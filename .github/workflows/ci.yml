@@ -1,0 +1,82 @@
+# ci.yml —— GitHub Actions CI（M0-T7）
+# 目标：在 macOS runner 上跑通与本地一致的验收门槛 —— swift build + swift test，
+# 附 SwiftLint 检查（error 拦、warning 放行）。不做签名/打包（见 移植规划.md M0-T7 边界）。
+#
+# 本文件改动时请在本地先跑一遍校验，CI 上就少一次红：
+#   actionlint .github/workflows/ci.yml
+# 或（没装 actionlint 时）：
+#   python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# 同一 ref 的新跑取消旧的跑：push 连续提交时不会堆积排队。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读仓库内容，够用且最小权限。
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: swift build & test
+    # runner 选择理由：macos-15 是 2026-09 仍处于 GA 支持窗口的 macOS arm64 镜像
+    # （actions/runner-images 的 Available Images 表：macos-15 / macos-15-xlarge 为 arm64；
+    # macos-15-intel、macos-15-large 为 x64）。相对 macos-latest/macos-26 更保守，
+    # 避免 latest 标签随 OS 大版本滚动导致 CI 环境被动漂移；同时默认工具链
+    # （Xcode 16.4 / Swift 6.1）满足 Package.swift 的 swift-tools-version 5.10
+    # 与 GRDB 7.x 的 6.1 要求。需要更强算力时可改 macos-15-xlarge。
+    runs-on: macos-15
+    # 冷缓存 + 依赖编译的实测耗时通常数分钟；30 分钟是兜底，防止挂死占满队列。
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      # 缓存选择：缓存 .build，而不是 ~/Library/Caches/org.swift.swiftpm。
+      # 理由：.build 同时含依赖源码 checkout 与编译产物，命中后 swift build 是真正的增量编译；
+      # org.swift.swiftpm 只缓存仓库/注册表元数据，每次仍需全量重新编译。
+      # 代价是 .build 体积更大、且编译器升级会让产物失效 —— 用 Package.resolved 的哈希作 key，
+      # 配合 restore-keys 前缀做部分命中的降级，产物失效时最坏退化为一次冷编译。
+      - name: Cache SwiftPM build directory
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: ${{ runner.os }}-${{ runner.arch }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-spm-
+
+      # SwiftLint 是可选的 lint 步骤：装不上（brew 抽风 / 网络抖动）不应该让 CI 红，
+      # 所以 continue-on-error，并由下面步骤里 command -v 的兜底判断跳过 lint。
+      - name: Install SwiftLint (optional)
+        continue-on-error: true
+        run: brew install swiftlint
+
+      - name: swift build
+        run: swift build
+
+      - name: swift test
+        run: swift test
+
+      # --quiet：只有 error 才非零退出，warning 放行（与 .swiftlint.yml 的强度设定一致）。
+      # 复用仓库脚本，保证 CI 与本地 Tools/run-swiftlint.sh 行为一致。
+      - name: SwiftLint (errors fail, warnings pass)
+        run: |
+          if ! command -v swiftlint >/dev/null 2>&1; then
+            echo "swiftlint not installed; skipping lint"
+            exit 0
+          fi
+          Tools/run-swiftlint.sh
