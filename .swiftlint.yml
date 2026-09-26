@@ -1,0 +1,48 @@
+# SwiftLint 配置 —— 基础规范，强度适中，不做过度约束。
+# 设计：只启用能长期维护、误报低的规则；业务代码放行必要的例外。
+
+included:
+  - NeriPlayer
+  - Tests
+
+excluded:
+  - .build
+  - Vendor
+  - NativeModules
+
+disabled_rules:
+  - todo
+  - trailing_whitespace
+
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - force_unwrapping
+
+line_length:
+  warning: 160
+  error: 250
+  ignores_comments: true
+  ignores_urls: true
+
+force_try: warning
+force_cast: warning
+force_unwrapping: warning
+
+identifier_name:
+  min_length: 1
+  excluded:
+    - id
+    - db
+
+type_body_length:
+  warning: 600
+  error: 1200
+
+file_length:
+  warning: 800
+  error: 1600
+
+function_body_length:
+  warning: 120
+  error: 300
