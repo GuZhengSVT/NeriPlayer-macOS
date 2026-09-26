@@ -1,0 +1,70 @@
+# ============================================================
+# NeriPlayer macOS — .gitignore
+# 注意：Package.resolved（SPM 依赖锁定）保持入库，不要整体忽略 .swiftpm
+# ============================================================
+
+# ---------- macOS 系统文件 ----------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+Desktop.ini
+
+# ---------- Xcode ----------
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# ---------- Swift Package Manager ----------
+/.build/
+/Packages/
+# .swiftpm 只忽略配置与生成物；Package.resolved 需要入库
+.swiftpm/configuration/
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+.netrc
+
+# ---------- 依赖管理 ----------
+Pods/
+
+# ---------- 预编译 Vendor 产物（由 Tools/fetch-mpv.sh 等脚本获取，不入库）----------
+/Vendor/mpv/
+/Vendor/libusb/
+/Vendor/out/
+
+# ---------- 构建与发布产物 ----------
+/dist/
+*.dmg
+*.app/
+*.app.tar.gz
+*.xcarchive
+
+# ---------- 运行时 / 本地数据 ----------
+# 仅忽略仓库根目录的数据库文件；Tests/ 下的 fixture 不受影响
+/*.sqlite
+/*.sqlite3
+/*.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.log
+
+# ---------- 密钥与环境 ----------
+.env
+.env.*
+
+# ---------- 编辑器 ----------
+.idea/
+.vscode/
+*.swp
+*~

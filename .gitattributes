@@ -1,0 +1,39 @@
+# 统一换行与二进制处理
+* text=auto
+
+# 文本源码
+*.swift text
+*.h text
+*.m text
+*.mm text
+*.c text
+*.cpp text
+*.metal text
+*.js text
+*.sh text eol=lf
+*.md text
+*.json text
+*.entitlements text
+*.plist text
+*.resolved text
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.icns binary
+*.pdf binary
+*.dylib binary
+*.a binary
+*.o binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.flac binary
+*.m4a binary
+*.wav binary
+*.lproj/* -text
