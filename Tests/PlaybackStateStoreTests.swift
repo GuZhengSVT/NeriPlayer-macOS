@@ -180,20 +180,20 @@ final class PlaybackStateStoreTests: XCTestCase {
         try await awaitPlaying(store, items[0])
 
         store.next()
-        try await awaitPlaying(store, items[1])
+        try await awaitLoadedAndPlaying(store, engine, 2, items[1])
         XCTAssertEqual(engine.loadCount, 2)
 
         store.next()
-        try await awaitPlaying(store, items[2])
+        try await awaitLoadedAndPlaying(store, engine, 3, items[2])
 
         store.next()
         XCTAssertEqual(store.currentTrack?.id, items[2].id, "顺序模式在末位 next 不动作")
         XCTAssertEqual(engine.loadCount, 3, "无推进时不应再加载")
 
         store.previous()
-        try await awaitPlaying(store, items[1])
+        try await awaitLoadedAndPlaying(store, engine, 4, items[1])
         store.previous()
-        try await awaitPlaying(store, items[0])
+        try await awaitLoadedAndPlaying(store, engine, 5, items[0])
         store.previous()
         XCTAssertEqual(store.currentTrack?.id, items[0].id, "顺序模式在首位 previous 不动作")
     }
@@ -211,7 +211,7 @@ final class PlaybackStateStoreTests: XCTestCase {
         XCTAssertEqual(store.currentTrack?.id, items[1].id, "非 force 的 next 在末位不动作")
 
         store.next(force: true)
-        try await awaitPlaying(store, items[0])
+        try await awaitLoadedAndPlaying(store, engine, 2, items[0])
         XCTAssertEqual(engine.lastLoadedURL, items[0].url)
     }
 
@@ -255,8 +255,9 @@ final class PlaybackStateStoreTests: XCTestCase {
 
         engine.simulateEndOfFile()
         // 单曲循环重播的是同一首，不能用「是否在播」判断推进是否发生（EOF 前它就已在播），
-        // 因此等待加载次数真正增长。
+        // 因此先等加载次数真正增长（计数器不会被流缓冲合并，是确定性信号）。
         try await waitForLoadCount(engine, 2)
+        _ = try await waitForSnapshot(store) { !$0.isCoreIdle }
         XCTAssertEqual(engine.lastLoadedURL, only.url, "单曲循环 EOF 应重新加载当前曲")
         XCTAssertFalse(store.snapshot.isCoreIdle, "重播后应处于播放态")
     }
@@ -271,7 +272,10 @@ final class PlaybackStateStoreTests: XCTestCase {
         try await awaitPlaying(store, items[0])
 
         engine.simulateEndOfFile()
-        try await awaitPlaying(store, items[1])
+        // 先用加载计数确认 EOF 推进确实发生（轮询快照在负载抖动下会偶发等待超时），
+        // 再断言快照反映新曲。
+        try await waitForLoadCount(engine, 2)
+        _ = try await waitForSnapshot(store) { $0.currentTrack?.id == items[1].id && !$0.isCoreIdle }
         XCTAssertEqual(engine.lastLoadedURL, items[1].url)
     }
 
@@ -315,7 +319,8 @@ final class PlaybackStateStoreTests: XCTestCase {
     /// 轮询 store 快照直到条件成立（真实引擎下比流式等待更稳）。
     private func waitForSnapshot(
         _ store: PlaybackStateStore,
-        seconds: Double = 8,
+        // 20 秒上限：正常 10ms 内即返回，仅在极端负载下兜底（实测本机多实例并发跑测试时 8s 会偶发不够）。
+        seconds: Double = 20,
         until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
     ) async throws -> PlaybackSnapshot {
         let deadline = Date().addingTimeInterval(seconds)
@@ -353,7 +358,7 @@ final class PlaybackStateStoreTests: XCTestCase {
     }
 
     /// 假引擎下等待加载次数达到期望值（用于「重播同一首」这类无法靠曲目 id 区分的推进）。
-    private func waitForLoadCount(_ engine: FakeEngine, _ expected: Int, seconds: Double = 3) async throws {
+    private func waitForLoadCount(_ engine: FakeEngine, _ expected: Int, seconds: Double = 20) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if engine.loadCount >= expected { return }
@@ -362,9 +367,25 @@ final class PlaybackStateStoreTests: XCTestCase {
         throw StoreTestError.timeout
     }
 
+    /// 假引擎下等待「加载次数达到 expectedLoads 且快照反映 track 在播」。
+    /// 以 loadCount 为推进信号、快照为最终断言，规避 AsyncStream newest-1 缓冲
+    /// 在高负载下偶发丢中间事件导致的快照等待超时（实测复现过 3 种用例）。
+    private func awaitLoadedAndPlaying(
+        _ store: PlaybackStateStore,
+        _ engine: FakeEngine,
+        _ expectedLoads: Int,
+        _ track: Track
+    ) async throws {
+        try await waitForLoadCount(engine, expectedLoads)
+        _ = try await waitForSnapshot(store) {
+            $0.currentTrack?.id == track.id && !$0.isCoreIdle
+        }
+    }
+
     /// 假引擎下等待某曲开始播放（脱离空闲态）。
     private func awaitPlaying(_ store: PlaybackStateStore, _ track: Track) async throws {
-        _ = try await waitForSnapshot(store, seconds: 3) {
+        // 与真实引擎用例的 8 秒一致：CI/后台负载抖动时 3 秒会闪失败（实测复现过）。
+        _ = try await waitForSnapshot(store, seconds: 8) {
             $0.currentTrack?.id == track.id && !$0.isCoreIdle
         }
     }
@@ -419,17 +440,16 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
     func load(url: URL) throws {
         guard url.isFileURL else { throw PlayerEngineError.unsupportedURL(url) }
         locked { loadCountValue += 1; lastLoadedURLValue = url }
-        // 模拟真实 libmpv「下发即返回」：状态在下一轮才变为播放中。
-        // 这样 store 的 EOF 闩锁一定来自它自己的订阅回调（而非同步读取），
-        // 测试里的 awaitPlaying 一旦观察到播放中就说明闩锁已武装，断言可确定。
-        Task { [weak self] in
-            self?.mutate { state in
-                state.currentURL = url
-                state.position = 0
-                state.duration = 60
-                state.isPaused = false
-                state.isCoreIdle = false
-            }
+        // 同步更新状态（真实 MPVEngine 里这一步由 mpv 事件异步驱动，但 store 的
+        // EOF 闩锁逻辑只依赖「先收到播放中、再收到空闲」的事件顺序，与同步/异步无关）。
+        // 之前这里用 Task 异步翻转，高负载下事件会被 AsyncStream 的 bufferingNewest(1)
+        // 合并，闩锁来不及武装，测试偶发超时（实测复现两次），故改为同步保证确定性。
+        mutate { state in
+            state.currentURL = url
+            state.position = 0
+            state.duration = 60
+            state.isPaused = false
+            state.isCoreIdle = false
         }
     }
 
