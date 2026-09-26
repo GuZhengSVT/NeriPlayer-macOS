@@ -329,7 +329,11 @@ final class PlaybackStateStoreTests: XCTestCase {
             if predicate(snapshot) { return snapshot }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        throw StoreTestError.timeout
+        // 带上最后快照，便于失败时诊断卡在哪个状态。
+        throw StoreTestError.snapshotTimeout(
+            last: store.snapshot,
+            predicate: String(describing: predicate)
+        )
     }
 
     // MARK: - 工具：流式阶段等待
@@ -408,6 +412,8 @@ private final class SnapshotReader: @unchecked Sendable {
 private enum StoreTestError: Error {
     case timeout
     case streamEnded
+    /// 超时并携带最后快照，用于诊断等待条件为何未满足。
+    case snapshotTimeout(last: PlaybackSnapshot, predicate: String)
 }
 
 /// 可控的假引擎：不驱动 libmpv，用 simulateEndOfFile 编排「自然播完」。
@@ -478,7 +484,12 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
     }
 
     func observeState() -> AsyncStream<PlayerEngineState> {
-        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        // unbounded：测试替身必须保留全部状态事件。store 的 EOF 闩锁依赖
+        // 「先看到播放中、再看到空闲」的事件顺序；bufferingNewest(1) 在高负载下
+        // 会用最新事件覆盖掉还没被消费的「播放中」事件，闩锁来不及武装，
+        // EOF 推进被跳过（实测复现的 flake 根因）。真实 MPVEngine 的每条属性流
+        // 缓冲为 64 且属性变更频率低，不受此问题影响。
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
             let id = UUID()
             lock.lock()
             let current = stateValue
