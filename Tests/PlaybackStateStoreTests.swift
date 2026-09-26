@@ -1,0 +1,509 @@
+// PlaybackStateStoreTests.swift
+// NeriPlayer macOS —— M1-T5：PlaybackStateStore 内存态与引擎/队列桥接测试。
+//
+// 分两类覆盖：
+//   1) 真实链路（真实 MPVEngine + 系统提示音 /System/Library/Sounds/*.aiff）：
+//      入队即播、toggle、自然播完后的单曲循环重播 / 列表循环接下一首 / 顺序模式停在末尾，
+//      以及「用户主动 stop 不触发推进」；不校验声音输出，只校验状态机。
+//   2) 桥接逻辑（可控的 FakeEngine，不驱动 libmpv）：next/previous/force 的队列走位、
+//      入队不改当前曲、模式切换保持当前曲，以及各模式的 EOF 推进判定。
+//
+// 为什么两类都要：真实链路证明代码确实与 libmpv 协同；假引擎把「引擎状态」变成可编排的输入，
+// 让顺序末尾、stop 区分这类边界可以确定性断言，而不必等待真实音频播完。
+
+import XCTest
+@testable import NeriPlayer
+
+final class PlaybackStateStoreTests: XCTestCase {
+
+    /// 系统提示音素材。Tink 短（约 0.56s）便于快速走到 EOF；Bottle 稍长（约 0.77s）用于区分两首。
+    private static let tinkURL = URL(fileURLWithPath: "/System/Library/Sounds/Tink.aiff")
+    private static let bottleURL = URL(fileURLWithPath: "/System/Library/Sounds/Bottle.aiff")
+
+    private func track(_ url: URL, _ title: String) -> Track {
+        Track(url: url, title: title)
+    }
+
+    private func makeStore(_ engine: any PlayerEngine) -> PlaybackStateStore {
+        PlaybackStateStore(engine: engine)
+    }
+
+    // MARK: - 初始态与订阅（真实引擎）
+
+    /// 空 store：无当前曲、非暂停、位置/时长为 0、队列为空。
+    func testInitialSnapshotIsEmpty() throws {
+        let store = makeStore(try MPVEngine(clientName: "store-initial"))
+        let snapshot = store.snapshot
+        XCTAssertNil(snapshot.currentTrack)
+        XCTAssertEqual(snapshot.position, 0)
+        XCTAssertEqual(snapshot.duration, 0)
+        XCTAssertFalse(snapshot.isPaused)
+        XCTAssertTrue(snapshot.queue.isEmpty)
+    }
+
+    /// observeState 先推当前快照，再在状态变化时继续推送；属性读取与快照一致。
+    func testObserveStateEmitsInitialSnapshotThenChanges() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-observe"))
+        let reader = SnapshotReader(store.observeState())
+
+        let firstSnapshot = await reader.next()
+        let initial = try XCTUnwrap(firstSnapshot, "订阅后应立刻收到一次当前快照")
+        XCTAssertNil(initial.currentTrack)
+        XCTAssertTrue(initial.queue.isEmpty)
+
+        let first = track(Self.tinkURL, "Tink")
+        store.enqueue(first)
+        let enqueued = try await nextState(reader) { $0.currentTrack?.id == first.id }
+        XCTAssertEqual(enqueued.currentTrack?.title, "Tink")
+        XCTAssertEqual(store.currentTrack?.id, first.id, "属性读取应反映最新快照")
+    }
+
+    // MARK: - 入队即播 / playTrack（真实引擎）
+
+    /// 空队列入队第一首：它立即成为当前曲并开始播放（脱离内核空闲态）。
+    func testEnqueueIntoEmptyQueueStartsPlayback() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-enqueue"))
+        let first = track(Self.tinkURL, "Tink")
+        store.enqueue(first)
+        XCTAssertEqual(store.currentTrack?.id, first.id, "入队后应立即成为当前曲")
+
+        let playing = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+        XCTAssertGreaterThan(playing.duration, 0, "开始播放后应读到时长")
+    }
+
+    /// playTrack 把曲目并入队列并立即播放（未在队列中则追加）。
+    func testPlayTrackAddsAndPlays() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-playtrack"))
+        let first = track(Self.tinkURL, "Tink")
+        store.playTrack(first)
+        XCTAssertEqual(store.queueState.tracks.map(\.id), [first.id])
+        _ = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+    }
+
+    // MARK: - toggle（真实引擎）
+
+    /// 播放中 toggle 变为暂停，再次 toggle 恢复播放。
+    func testTogglePlayPauseReflectsEngine() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-toggle"))
+        let first = track(Self.bottleURL, "Bottle")
+        store.setQueue([first], startIndex: 0)
+        _ = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle && !$0.isPaused }
+
+        store.togglePlayPause()
+        _ = try await waitForSnapshot(store) { $0.isPaused }
+
+        store.togglePlayPause()
+        _ = try await waitForSnapshot(store) { !$0.isPaused && !$0.isCoreIdle }
+    }
+
+    // MARK: - EOF 推进（真实引擎）
+
+    /// 单曲循环：自然播完后重新加载同一首并继续播放。
+    func testRepeatOneReplaysCurrentTrackAfterEOF() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-repeat-one"))
+        let only = track(Self.tinkURL, "Tink")
+        store.setMode(.repeatOne)
+        store.setQueue([only], startIndex: 0)
+        let reader = SnapshotReader(store.observeState())
+
+        _ = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == only.id && !$0.isCoreIdle && $0.position > 0.2 }
+        _ = try await nextState(reader, seconds: 8) { $0.isCoreIdle }
+        let replayed = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == only.id && !$0.isCoreIdle }
+        XCTAssertEqual(replayed.currentTrack?.title, "Tink", "单曲循环应重播同一首")
+    }
+
+    /// 列表循环：第一首自然播完后自动接下一首，走到末尾再回卷到首曲。
+    func testRepeatAllAdvancesAndWrapsAfterEOF() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-repeat-all"))
+        let first = track(Self.tinkURL, "Tink")
+        let second = track(Self.bottleURL, "Bottle")
+        store.setMode(.repeatAll)
+        store.setQueue([first, second], startIndex: 0)
+        let reader = SnapshotReader(store.observeState())
+
+        _ = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+        _ = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == second.id && !$0.isCoreIdle }
+        let wrapped = try await nextState(reader, seconds: 10) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+        XCTAssertEqual(wrapped.queue.currentIndex, 0, "列表循环应在末尾回卷到首曲")
+    }
+
+    /// 顺序模式：播到最后一首后不再前进，停在末尾（当前曲保留、内核空闲）。
+    func testSequentialStopsAtLastTrackAfterEOF() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-sequential"))
+        let first = track(Self.tinkURL, "Tink")
+        let second = track(Self.bottleURL, "Bottle")
+        store.setMode(.sequential)
+        store.setQueue([first, second], startIndex: 0)
+        let reader = SnapshotReader(store.observeState())
+
+        _ = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+        _ = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == second.id && !$0.isCoreIdle }
+        let stopped = try await nextState(reader, seconds: 8) { $0.currentTrack?.id == second.id && $0.isCoreIdle }
+        XCTAssertEqual(stopped.queue.currentIndex, 1, "顺序模式应停在最后一首")
+
+        // 再等一小段，确认不会「停一下又自己重播」。
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertEqual(store.currentTrack?.id, second.id)
+        XCTAssertTrue(store.snapshot.isCoreIdle, "顺序模式播完后应保持停止，不再自动推进")
+    }
+
+    /// 用户主动 stop 后不应自动推进：即使引擎回到空闲态，当前曲与索引保持不变。
+    func testStopDoesNotTriggerAdvance() async throws {
+        let store = makeStore(try MPVEngine(clientName: "store-stop"))
+        let first = track(Self.bottleURL, "Bottle")
+        let second = track(Self.tinkURL, "Tink")
+        store.setQueue([first, second], startIndex: 0)
+        _ = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
+
+        store.stop()
+        XCTAssertTrue(store.snapshot.isCoreIdle, "stop 后内核应空闲")
+        XCTAssertEqual(store.currentTrack?.id, first.id, "stop 不应清空当前曲")
+
+        // 给足超过一首时长的时间，确认没有发生 EOF 式推进。
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        XCTAssertEqual(store.currentTrack?.id, first.id, "stop 后不得自动推进")
+        XCTAssertEqual(store.queueState.currentIndex, 0)
+        XCTAssertTrue(store.snapshot.isCoreIdle)
+    }
+
+    // MARK: - 切歌与队列桥接（假引擎，确定性）
+
+    /// next() 推进索引并让引擎加载新曲；previous() 回退；顺序模式两端不再越界。
+    func testNextAndPreviousDriveEngine() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let items = [track(Self.tinkURL, "A"), track(Self.bottleURL, "B"), track(Self.tinkURL, "C")]
+        store.setMode(.sequential)
+        store.setQueue(items, startIndex: 0)
+        try await awaitPlaying(store, items[0])
+
+        store.next()
+        try await awaitPlaying(store, items[1])
+        XCTAssertEqual(engine.loadCount, 2)
+
+        store.next()
+        try await awaitPlaying(store, items[2])
+
+        store.next()
+        XCTAssertEqual(store.currentTrack?.id, items[2].id, "顺序模式在末位 next 不动作")
+        XCTAssertEqual(engine.loadCount, 3, "无推进时不应再加载")
+
+        store.previous()
+        try await awaitPlaying(store, items[1])
+        store.previous()
+        try await awaitPlaying(store, items[0])
+        store.previous()
+        XCTAssertEqual(store.currentTrack?.id, items[0].id, "顺序模式在首位 previous 不动作")
+    }
+
+    /// next(force: true) 在末位回卷到首曲。
+    func testNextForceWrapsAtEnd() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let items = [track(Self.tinkURL, "A"), track(Self.bottleURL, "B")]
+        store.setMode(.sequential)
+        store.setQueue(items, startIndex: 1)
+        try await awaitPlaying(store, items[1])
+
+        store.next()
+        XCTAssertEqual(store.currentTrack?.id, items[1].id, "非 force 的 next 在末位不动作")
+
+        store.next(force: true)
+        try await awaitPlaying(store, items[0])
+        XCTAssertEqual(engine.lastLoadedURL, items[0].url)
+    }
+
+    /// 入队不改当前曲（仅入队到空队列才立即开播）。
+    func testEnqueueKeepsCurrentTrack() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let first = track(Self.tinkURL, "A")
+        store.setQueue([first], startIndex: 0)
+        try await awaitPlaying(store, first)
+
+        store.enqueue(track(Self.bottleURL, "B"))
+        store.enqueueNext(track(Self.tinkURL, "C"))
+        XCTAssertEqual(store.currentTrack?.id, first.id, "入队不应改变当前曲")
+        XCTAssertEqual(store.queueState.tracks.count, 3)
+        XCTAssertEqual(engine.loadCount, 1, "入队不应触发加载")
+    }
+
+    /// 切换播放模式保持当前曲不变。
+    func testSetModeKeepsCurrentTrack() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let first = track(Self.tinkURL, "A")
+        store.setQueue([first], startIndex: 0)
+        try await awaitPlaying(store, first)
+
+        store.setMode(.shuffle)
+        XCTAssertEqual(store.currentTrack?.id, first.id)
+        XCTAssertEqual(store.queueState.mode, .shuffle)
+        XCTAssertEqual(engine.loadCount, 1)
+    }
+
+    /// 单曲循环 EOF：重新加载同一首。
+    func testFakeRepeatOneEOFReloadsSameTrack() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let only = track(Self.tinkURL, "A")
+        store.setMode(.repeatOne)
+        store.setQueue([only], startIndex: 0)
+        try await awaitPlaying(store, only)
+
+        engine.simulateEndOfFile()
+        // 单曲循环重播的是同一首，不能用「是否在播」判断推进是否发生（EOF 前它就已在播），
+        // 因此等待加载次数真正增长。
+        try await waitForLoadCount(engine, 2)
+        XCTAssertEqual(engine.lastLoadedURL, only.url, "单曲循环 EOF 应重新加载当前曲")
+        XCTAssertFalse(store.snapshot.isCoreIdle, "重播后应处于播放态")
+    }
+
+    /// 列表循环 EOF：推进到下一首并加载。
+    func testFakeRepeatAllEOFAdvances() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let items = [track(Self.tinkURL, "A"), track(Self.bottleURL, "B")]
+        store.setMode(.repeatAll)
+        store.setQueue(items, startIndex: 0)
+        try await awaitPlaying(store, items[0])
+
+        engine.simulateEndOfFile()
+        try await awaitPlaying(store, items[1])
+        XCTAssertEqual(engine.lastLoadedURL, items[1].url)
+    }
+
+    /// 顺序模式 EOF 在末位：不推进、不再加载，保持停止。
+    func testFakeSequentialEOFAtEndStops() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let items = [track(Self.tinkURL, "A"), track(Self.bottleURL, "B")]
+        store.setMode(.sequential)
+        store.setQueue(items, startIndex: 1)
+        try await awaitPlaying(store, items[1])
+
+        engine.simulateEndOfFile()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(store.currentTrack?.id, items[1].id, "顺序模式末位 EOF 应停在当前曲")
+        XCTAssertEqual(engine.loadCount, 1, "不应发生推进加载")
+    }
+
+    /// stop 之后引擎回到空闲态不触发推进（stop 与 EOF 必须区分）。
+    func testFakeStopDoesNotAdvanceOnIdle() async throws {
+        let engine = FakeEngine()
+        let store = makeStore(engine)
+        let items = [track(Self.tinkURL, "A"), track(Self.bottleURL, "B")]
+        store.setMode(.repeatAll)
+        store.setQueue(items, startIndex: 0)
+        try await awaitPlaying(store, items[0])
+
+        store.stop()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(store.currentTrack?.id, items[0].id, "stop 后不得推进下一首")
+        XCTAssertEqual(engine.loadCount, 1)
+        XCTAssertTrue(store.snapshot.isCoreIdle)
+
+        // stop 后 toggle 应从当前曲恢复播放。
+        store.togglePlayPause()
+        try await awaitPlaying(store, items[0])
+    }
+
+    // MARK: - 工具：真实引擎轮询
+
+    /// 轮询 store 快照直到条件成立（真实引擎下比流式等待更稳）。
+    private func waitForSnapshot(
+        _ store: PlaybackStateStore,
+        seconds: Double = 8,
+        until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
+    ) async throws -> PlaybackSnapshot {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            let snapshot = store.snapshot
+            if predicate(snapshot) { return snapshot }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw StoreTestError.timeout
+    }
+
+    // MARK: - 工具：流式阶段等待
+
+    /// 从读取器推进到首个满足条件的快照。
+    private func nextState(
+        _ reader: SnapshotReader,
+        seconds: Double = 5,
+        until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
+    ) async throws -> PlaybackSnapshot {
+        try await withThrowingTaskGroup(of: PlaybackSnapshot.self) { group in
+            group.addTask {
+                while let snapshot = await reader.next() {
+                    if predicate(snapshot) { return snapshot }
+                }
+                throw StoreTestError.streamEnded
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw StoreTestError.timeout
+            }
+            guard let result = try await group.next() else { throw StoreTestError.timeout }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// 假引擎下等待加载次数达到期望值（用于「重播同一首」这类无法靠曲目 id 区分的推进）。
+    private func waitForLoadCount(_ engine: FakeEngine, _ expected: Int, seconds: Double = 3) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if engine.loadCount >= expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw StoreTestError.timeout
+    }
+
+    /// 假引擎下等待某曲开始播放（脱离空闲态）。
+    private func awaitPlaying(_ store: PlaybackStateStore, _ track: Track) async throws {
+        _ = try await waitForSnapshot(store, seconds: 3) {
+            $0.currentTrack?.id == track.id && !$0.isCoreIdle
+        }
+    }
+}
+
+/// 状态流读取器。设计为单消费者：每个测试只在一条等待链里使用同一读取器，故不做并发读保护。
+private final class SnapshotReader: @unchecked Sendable {
+    private var iterator: AsyncStream<PlaybackSnapshot>.AsyncIterator
+
+    init(_ stream: AsyncStream<PlaybackSnapshot>) {
+        iterator = stream.makeAsyncIterator()
+    }
+
+    func next() async -> PlaybackSnapshot? {
+        await iterator.next()
+    }
+}
+
+/// 测试内部错误标记。
+private enum StoreTestError: Error {
+    case timeout
+    case streamEnded
+}
+
+/// 可控的假引擎：不驱动 libmpv，用 simulateEndOfFile 编排「自然播完」。
+/// 让 EOF 推进、stop 区分这类边界可以确定性断言，避免真实音频的时序抖动。
+private final class FakeEngine: PlayerEngine, @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var stateValue: PlayerEngineState = .idle
+    private var continuations: [UUID: AsyncStream<PlayerEngineState>.Continuation] = [:]
+    private var loadCountValue = 0
+    private var lastLoadedURLValue: URL?
+    private var lastVolumeValue: Double?
+    private var lastSeekValue: Double?
+
+    var currentURL: URL? { snapshot.currentURL }
+    var isPaused: Bool { snapshot.isPaused }
+    var position: Double { snapshot.position }
+    var duration: Double { snapshot.duration }
+    var isCoreIdle: Bool { snapshot.isCoreIdle }
+
+    /// 已受理的加载次数。
+    var loadCount: Int { locked { loadCountValue } }
+    /// 最近一次加载的 URL。
+    var lastLoadedURL: URL? { locked { lastLoadedURLValue } }
+    /// 最近一次音量命令。
+    var lastVolume: Double? { locked { lastVolumeValue } }
+    /// 最近一次跳转位置。
+    var lastSeek: Double? { locked { lastSeekValue } }
+
+    func load(url: URL) throws {
+        guard url.isFileURL else { throw PlayerEngineError.unsupportedURL(url) }
+        locked { loadCountValue += 1; lastLoadedURLValue = url }
+        // 模拟真实 libmpv「下发即返回」：状态在下一轮才变为播放中。
+        // 这样 store 的 EOF 闩锁一定来自它自己的订阅回调（而非同步读取），
+        // 测试里的 awaitPlaying 一旦观察到播放中就说明闩锁已武装，断言可确定。
+        Task { [weak self] in
+            self?.mutate { state in
+                state.currentURL = url
+                state.position = 0
+                state.duration = 60
+                state.isPaused = false
+                state.isCoreIdle = false
+            }
+        }
+    }
+
+    func play() throws {
+        guard snapshot.currentURL != nil else { throw PlayerEngineError.noCurrentItem }
+        mutate { $0.isPaused = false }
+    }
+
+    func pause() throws {
+        guard snapshot.currentURL != nil else { throw PlayerEngineError.noCurrentItem }
+        mutate { $0.isPaused = true }
+    }
+
+    func stop() throws {
+        mutate { $0 = .idle }
+    }
+
+    func seek(to seconds: Double) throws {
+        guard snapshot.currentURL != nil else { throw PlayerEngineError.noCurrentItem }
+        locked { lastSeekValue = seconds }
+        mutate { $0.position = seconds }
+    }
+
+    func setVolume(_ volume: Double) throws {
+        locked { lastVolumeValue = volume }
+    }
+
+    func observeState() -> AsyncStream<PlayerEngineState> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let id = UUID()
+            lock.lock()
+            let current = stateValue
+            continuations[id] = continuation
+            lock.unlock()
+            continuation.onTermination = { [weak self] _ in
+                self?.removeContinuation(id)
+            }
+            continuation.yield(current)
+        }
+    }
+
+    /// 模拟自然播完：内核回到空闲且位置归零（currentURL 保留，与真实 MPVEngine 一致）。
+    func simulateEndOfFile() {
+        mutate { state in
+            state.position = 0
+            state.isCoreIdle = true
+        }
+    }
+
+    private var snapshot: PlayerEngineState { locked { stateValue } }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    private func mutate(_ body: (inout PlayerEngineState) -> Void) {
+        lock.lock()
+        var next = stateValue
+        body(&next)
+        guard next != stateValue else {
+            lock.unlock()
+            return
+        }
+        stateValue = next
+        let listeners = Array(continuations.values)
+        lock.unlock()
+        for listener in listeners {
+            listener.yield(next)
+        }
+    }
+
+    private func removeContinuation(_ id: UUID) {
+        lock.lock()
+        continuations.removeValue(forKey: id)
+        lock.unlock()
+    }
+}
