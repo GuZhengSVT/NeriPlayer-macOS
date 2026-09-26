@@ -1,5 +1,5 @@
 {
-  "originHash" : "ff6331ee9e5b778df84c2ed2c314b9cf66187a53b09acda4025e774d270f9a01",
+  "originHash" : "d13865bc313ba22ba03a513d1e91cbbacf645a8040a7c49ac1ad076cf071d913",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
         "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "taglibswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jeonghi/TagLibSwift.git",
+      "state" : {
+        "revision" : "a36e48f43a4cea1fd41baa0c90acdb6f35444800",
+        "version" : "0.2.0-rc.1"
       }
     }
   ],
