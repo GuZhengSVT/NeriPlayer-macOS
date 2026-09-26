@@ -156,6 +156,8 @@ final class PlaybackStateStoreTests: XCTestCase {
         _ = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle }
 
         store.stop()
+        // stop 后引擎状态更新是异步的，立即断言会闪失败；轮询等待其变为空闲。
+        _ = try await waitForSnapshot(store, seconds: 8) { $0.isCoreIdle }
         XCTAssertTrue(store.snapshot.isCoreIdle, "stop 后内核应空闲")
         XCTAssertEqual(store.currentTrack?.id, first.id, "stop 不应清空当前曲")
 
