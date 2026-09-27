@@ -11,6 +11,10 @@
 //      「先探测崩溃 → 再启动播放集成」，不需要额外的启动协调代码。
 // 安全模式逻辑保持原样：detectSafeMode 与 CrashState 读取都不做改动；
 // 播放集成无条件启动（M1 尚无「安全模式下要禁用的功能」，见 M1-T6 报告遗留问题）。
+//
+// M3-T2：统计写入管道。startPlaybackStats 在播放集成之后启动，订阅 PlaybackStateStore 的
+// 快照流累积收听统计，并按切歌 / 会话结束 / 定时 30 秒 / 退出四种时机批量落库。安全模式下
+// 不启动这条管道（统计是「记录用户行为」的副作用，安全模式期间不额外写库；播放仍完全可用）。
 
 import AppKit
 import Combine
@@ -30,6 +34,10 @@ public final class AppState: ObservableObject {
     @Published private(set) var libraryViewModel: LibraryViewModel?
     /// 媒体库数据库连接（M2-T3）。与 libraryViewModel 同生命周期；本对象关闭即释放。
     private var libraryDatabase: DatabaseProvider?
+    /// 统计写入管道（M3-T2）。订阅播放快照累积统计，退出时 flush；未启动为 nil。
+    private var playbackStats: PlaybackStatsRecorder?
+    /// 统计管道专用的数据库连接（M3-T2）。与 playbackStats 同生命周期。
+    private var statsDatabase: DatabaseProvider?
     /// 应用退出通知观察者；stopPlaybackIntegration 时注销。
     private var terminateObserver: NSObjectProtocol?
 
@@ -43,6 +51,8 @@ public final class AppState: ObservableObject {
         if let terminateObserver {
             NotificationCenter.default.removeObserver(terminateObserver)
         }
+        // 退出前最后一道：把内存里没落库的统计写出去（正常路径已由退出通知触发）。
+        playbackStats?.stop()
         nowPlaying?.stop()
         playbackStore?.stop()
     }
@@ -111,5 +121,30 @@ public final class AppState: ObservableObject {
         self.nowPlaying = nil
         playbackStore = nil
         Log.player.info("播放集成已清理：媒体键命令已注销，Now Playing 已清空")
+    }
+
+    // MARK: - 统计写入管道（M3-T2）
+
+    /// 启动统计写入管道：订阅播放内存态快照，按切歌 / 会话结束 / 定时 30 秒 / 退出四种时机落库。
+    ///
+    /// 前置：播放集成已启动（playbackStore 非 nil）。幂等：已启动则直接返回。
+    /// 安全模式下不启动 —— 统计只是「记录用户行为」的副作用，安全模式期间不额外写库；
+    /// 开库失败只记录日志并保持 nil，播放与媒体库功能不受影响。
+    public func startPlaybackStats() {
+        guard !isSafeMode, playbackStats == nil, let store = playbackStore else { return }
+        do {
+            // 统计管道与媒体库各持一个 DatabaseProvider：两者都是「一个库文件一个实例」的连接
+            // 对象，指向同一个库文件即可，不需要（也不应该）跨模块传递连接。
+            let database = try DatabaseProvider()
+            try database.setupIfNeeded()
+            let handler = PlaybackStatsFlushHandler(database)
+            let recorder = PlaybackStatsRecorder(flush: { deltas in try handler.callAsFunction(deltas) })
+            recorder.attach(to: store)
+            statsDatabase = database
+            playbackStats = recorder
+            Log.player.info("统计写入管道已就绪：\(database.databaseURL.path, privacy: .public)")
+        } catch {
+            Log.player.error("统计写入管道启动失败（统计不落库，播放不受影响）：\(error.localizedDescription)")
+        }
     }
 }

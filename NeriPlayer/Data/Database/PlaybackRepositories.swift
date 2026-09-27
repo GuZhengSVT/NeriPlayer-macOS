@@ -16,6 +16,89 @@
 import Foundation
 import GRDB
 
+// MARK: - 统计写入管道落库（M3-T2）
+
+/// 把 Core 层统计管道（PlaybackStatsRecorder）交来的增量批量落库。
+///
+/// 为什么落库要单独做一个入口，而不是让管道直接调 Repository 的两个 upsert：
+///   1) 增量是「加数」而不是「绝对值」，而 M3-T1 的 upsert 是整行覆盖（注释里写明
+///      「本层不做累加」）。累加必须发生在这里 —— 先读既有行、加上增量、再写回；
+///   2) 一次 flush 的整批增量必须一起成功或一起失败：recorder 的幂等与重试建立在
+///      「抛出 = 整批未落库」之上，若某一条写了一半，并回内存重试就会把已落库的那条双计。
+///      因此整批放在同一个写事务里，任意一条失败即整事务回滚；
+///   3) 每日桶与累计行要一起更新，放同一事务也保证「累计次数」与「当日次数」不会各写一半。
+///
+/// 时间语义：firstPlayedAt 取最小、lastPlayedAt 取最大（对齐原库 minPositiveTimestamp /
+/// maxOf），因此无论增量以什么顺序到达，结果都与合并顺序无关。
+public struct PlaybackStatsFlushHandler {
+
+    private let database: DatabaseProvider
+
+    public init(_ database: DatabaseProvider) {
+        self.database = database
+    }
+
+    /// 批量落库。空数组直接返回。抛出即整批未落库（事务回滚）。
+    public func callAsFunction(_ deltas: [PlaybackStatsDelta]) throws {
+        guard !deltas.isEmpty else { return }
+        try database.dbQueue.write { db in
+            for delta in deltas where !delta.isEmpty {
+                try Self.apply(delta, in: db)
+            }
+        }
+        Log.db.debug("统计落库：\(deltas.count) 条增量")
+    }
+
+    /// 把一条增量并进累计行与每日桶。同一事务内执行。
+    private static func apply(_ delta: PlaybackStatsDelta, in db: Database) throws {
+        // 累计行（一首歌一行）。
+        let existingStats = try PlaybackStatsRecord.fetchOne(db, key: delta.trackId)
+        let stats = PlaybackStats(
+            trackId: delta.trackId,
+            totalListenSeconds: (existingStats?.totalListenSeconds ?? 0) + delta.listenSeconds,
+            playCount: (existingStats?.playCount ?? 0) + delta.playCount,
+            firstPlayedAt: minDate(existingStats?.firstPlayedAt, delta.firstPlayedAt),
+            lastPlayedAt: maxDate(existingStats?.lastPlayedAt, delta.lastPlayedAt)
+        )
+        try PlaybackStatsRecord(stats: stats).save(db)
+
+        // 每日桶（(dayStart, trackId) 复合主键）。
+        let existingBucket = try PlaybackStatsDailyBucketRecord.fetchOne(
+            db,
+            key: ["dayStart": delta.dayStart, "trackId": delta.trackId]
+        )
+        let bucket = PlaybackStatsDailyBucket(
+            dayStart: delta.dayStart,
+            trackId: delta.trackId,
+            totalListenSeconds: (existingBucket?.totalListenSeconds ?? 0) + delta.listenSeconds,
+            playCount: (existingBucket?.playCount ?? 0) + delta.playCount,
+            firstPlayedAt: minDate(existingBucket?.firstPlayedAt, delta.firstPlayedAt),
+            lastPlayedAt: maxDate(existingBucket?.lastPlayedAt, delta.lastPlayedAt)
+        )
+        try PlaybackStatsDailyBucketRecord(bucket: bucket).save(db)
+    }
+
+    /// 取两个可空时间里较早的一个；都为 nil 时保持 nil。
+    private static func minDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return min(left, right)
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+
+    /// 取两个可空时间里较晚的一个；都为 nil 时保持 nil。
+    private static func maxDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return max(left, right)
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+}
+
 // MARK: - 播放历史
 
 /// PlayHistory 表的读写。

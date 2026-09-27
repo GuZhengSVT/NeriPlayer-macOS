@@ -23,6 +23,8 @@ struct NeriPlayerApp: App {
                     // 顺序有讲究：先按崩溃记录决定是否降级，再启动播放集成。
                     appState.detectSafeMode()
                     appState.startPlaybackIntegration()
+                    // M3-T2：统计写入管道（依赖上一步创建的 playbackStore；安全模式下自行跳过）。
+                    appState.startPlaybackStats()
                     // M2-T5：打开媒体库（失败时媒体库 tab 回落占位视图，不影响其他 tab）。
                     appState.startLibrary()
                 }
