@@ -12,7 +12,17 @@
 // 为什么同步服务长期持有：LibraryScanner 的增量缓存就在服务实例里（见 M2-T2/M2-T4 注释）。
 // 每轮同步都新建服务等于每轮重读全部元数据；这里 init 时构造一次并复用。
 //
-// 边界（不做）：歌单详情页、收藏、编辑元数据、拖拽排序 —— 属于后续任务或更晚的里程碑。
+// 收藏与歌单（M2-T7）：为什么不新开一个 PlaylistListViewModel —— 歌单列表本来就由本类持有
+// （右键「加入歌单」子菜单的数据源就是它）。若歌单管理页另起一个视图模型，同一个歌单集合会有
+// 两份内存态：在管理页新建的歌单不会出现在右键菜单里，反之亦然，除非再补一层跨模型同步。
+// 让两者共用 LibraryViewModel 是本任务的选择：一份 playlists、一条 refresh 路径、
+// 一个错处可查。收藏同理（favorites / favoriteTrackIds 与曲目列表同批刷新）。
+//
+// 「只看收藏」过滤为什么复用搜索管线：过滤后的列表同样要驱动歌手/专辑聚合与「播放全部」，
+// 若在视图里再过滤一遍，聚合就会与列表不同源。这里把 onlyFavorites 纳入取数：索引建在
+// 「当前数据源」（收藏或全库）之上，搜索、聚合、过滤三者自动共享同一批曲目。
+//
+// 边界（不做）：编辑元数据、智能歌单、拖拽排序的动画打磨 —— 属于后续任务或更晚的里程碑。
 //
 // 搜索（M2-T6）：搜索框内容放这里而不是视图的 @State —— 搜索要用拼音索引，索引必须在
 // 曲目集变化时作废重建，这个生命周期只有拥有曲目的视图模型看得见。防抖 200ms 后先在
@@ -163,6 +173,28 @@ enum LibraryGrouping {
 
 // MARK: - 视图模型
 
+/// 歌单内曲目的排序纯函数。
+///
+/// 单独成一处是为了让「拖拽落库的顺序」可以被单测直接断言：视图给的是 IndexSet + 目标下标，
+/// 仓库要的是完整的新顺序（见 `PlaylistRepository.reorder`），中间的数组搬移不放视图里。
+enum PlaylistOrdering {
+
+    /// 把 `items` 中 `source` 位置上的元素整体搬到 `destination` 之前，返回新数组。
+    ///
+    /// 语义对齐 SwiftUI `MutableCollection.move(fromOffsets:toOffset:)`：
+    /// destination 是「插入点」在**搬移前**的下标。搬移自身是稳定的——被移动的元素保持
+    /// 相对顺序，其余元素也保持相对顺序。
+    static func moved<T>(_ items: [T], from source: IndexSet, to destination: Int) -> [T] {
+        let removed = source.sorted().map { items[$0] }
+        var remaining = items
+        for index in source.sorted(by: >) { remaining.remove(at: index) }
+        // destination 是搬移前坐标系里的插入点：减去「位于它之前、已被移除的元素」个数。
+        let insertionIndex = destination - source.filter { $0 < destination }.count
+        let clamped = min(max(insertionIndex, 0), remaining.count)
+        return Array(remaining[0..<clamped]) + removed + Array(remaining[clamped...])
+    }
+}
+
 /// 媒体库 tab 的视图模型：曲目/聚合/歌单内存态 + 目录导入 + 歌单写入口。
 @MainActor
 final class LibraryViewModel: ObservableObject {
@@ -175,6 +207,26 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var albumGroups: [AlbumGroup] = []
     /// 歌单列表（右键「加入歌单」子菜单的数据源）。
     @Published private(set) var playlists: [PlaylistInfo] = []
+    /// 各歌单曲目数（playlistId -> count），歌单列表页的「N 首」角标用它，避免逐行查库。
+    @Published private(set) var playlistCounts: [UUID: Int] = [:]
+    /// 当前打开的歌单详情对应的歌单 id；nil 表示停在歌单列表页。
+    @Published var openPlaylistId: UUID?
+    /// 当前打开歌单的曲目（按 position 升序），驱动详情页列表与整单播放。
+    @Published private(set) var playlistEntries: [LibraryTrack] = []
+    /// 全部收藏曲目，按收藏时间倒序（M2-T7）。
+    @Published private(set) var favorites: [LibraryTrack] = []
+    /// 已收藏曲目的 id 集合，供列表行批量渲染星标（一次取全，避免逐行查库）。
+    @Published private(set) var favoriteTrackIds: Set<UUID> = []
+    /// 「只看收藏」开关。改为 true 时当前列表（含搜索与歌手/专辑聚合）只保留收藏曲目。
+    @Published var onlyFavorites: Bool = false {
+        didSet {
+            guard onlyFavorites != oldValue else { return }
+            // 数据源换了：聚合要按新的数据源重算，旧的拼音索引与命中结果也都不能再用。
+            invalidateSearchIndex()
+            recomputeAggregates()
+            refreshSearchState()
+        }
+    }
     /// 当前选中的歌手组（供详情页回读最新数据）。
     @Published var selectedArtist: ArtistGroup?
     /// 当前选中的专辑组。
@@ -207,6 +259,7 @@ final class LibraryViewModel: ObservableObject {
 
     private let libraryRepository: LibraryRepository
     private let playlistRepository: PlaylistRepository
+    private let favoriteRepository: FavoriteRepository
     private let syncService: LibrarySyncService
 
     /// 搜索防抖窗口：连续输入在 200ms 内只结算一次。
@@ -224,10 +277,12 @@ final class LibraryViewModel: ObservableObject {
     init(
         libraryRepository: LibraryRepository,
         playlistRepository: PlaylistRepository,
+        favoriteRepository: FavoriteRepository,
         syncService: LibrarySyncService? = nil
     ) {
         self.libraryRepository = libraryRepository
         self.playlistRepository = playlistRepository
+        self.favoriteRepository = favoriteRepository
         self.syncService = syncService ?? LibrarySyncService(repository: libraryRepository)
     }
 
@@ -235,12 +290,26 @@ final class LibraryViewModel: ObservableObject {
     convenience init(database: DatabaseProvider) {
         self.init(
             libraryRepository: LibraryRepository(database),
-            playlistRepository: PlaylistRepository(database)
+            playlistRepository: PlaylistRepository(database),
+            favoriteRepository: FavoriteRepository(database)
         )
     }
 
     /// 库中是否没有曲目（首次启动引导的显示条件）。
     var isEmpty: Bool { tracks.isEmpty }
+
+    /// 当前数据源：全库，或「只看收藏」时的收藏集。搜索索引、聚合、列表都从这里取数，
+    /// 因此过滤开关一开，三个维度（歌曲/歌手/专辑）一起收敛为收藏曲目。
+    var sourceTracks: [LibraryTrack] { onlyFavorites ? favorites : tracks }
+
+    /// 「只看收藏」开着但一首收藏都没有：视图用它显示「还没有收藏」而不是「库是空的」。
+    var isFavoritesFilterEmpty: Bool { onlyFavorites && favorites.isEmpty }
+
+    /// 当前打开的歌单（nil 表示停在歌单列表页）。
+    var openPlaylist: PlaylistInfo? {
+        guard let openPlaylistId else { return nil }
+        return playlists.first { $0.id == openPlaylistId }
+    }
 
     /// 是否处于搜索态（查询串去掉首尾空白后非空）。
     var isSearching: Bool { !LibrarySearchEngine.normalize(searchQuery).isEmpty }
@@ -260,15 +329,32 @@ final class LibraryViewModel: ObservableObject {
         do {
             let loaded = try libraryRepository.allTracksSorted(by: .title)
             tracks = loaded
-            artistGroups = LibraryGrouping.artistGroups(from: loaded)
-            albumGroups = LibraryGrouping.albumGroups(from: loaded)
-            playlists = try playlistRepository.list()
+            let loadedFavorites = try favoriteRepository.favorites()
+            favorites = loadedFavorites
+            favoriteTrackIds = Set(loadedFavorites.map(\.id))
+            recomputeAggregates()
+            try reloadPlaylistList()
+            reloadOpenPlaylist()
             errorMessage = nil
             refreshSearchState()
         } catch {
             errorMessage = "媒体库加载失败：\(error.localizedDescription)"
             Log.ui.error("媒体库加载失败：\(error.localizedDescription)")
         }
+    }
+
+    /// 按当前数据源重算歌手/专辑聚合。
+    private func recomputeAggregates() {
+        let source = sourceTracks
+        artistGroups = LibraryGrouping.artistGroups(from: source)
+        albumGroups = LibraryGrouping.albumGroups(from: source)
+    }
+
+    /// 重读歌单列表与各歌单曲目数。所有会改动歌单集合的写入口都走这里，
+    /// 保证「列表」与「计数」永远同批刷新（少一处，就会出现删了歌单但角标还留着的错位）。
+    private func reloadPlaylistList() throws {
+        playlists = try playlistRepository.list()
+        playlistCounts = try playlistRepository.entryCounts()
     }
 
     /// 详情页回读：按歌手组 id 取最新曲目（同步刷新后详情跟随更新，而不是显示进页时的快照）。
@@ -344,7 +430,8 @@ final class LibraryViewModel: ObservableObject {
     func add(_ track: LibraryTrack, to playlist: PlaylistInfo) {
         do {
             try playlistRepository.addTrack(playlistId: playlist.id, trackId: track.id)
-            playlists = try playlistRepository.list()
+            try reloadPlaylistList()
+            if openPlaylistId == playlist.id { reloadOpenPlaylist() }
             statusMessage = "已加入歌单「\(playlist.name)」"
         } catch {
             errorMessage = "加入歌单失败：\(error.localizedDescription)"
@@ -353,20 +440,133 @@ final class LibraryViewModel: ObservableObject {
 
     /// 新建歌单，可选把当前右键的曲目一并加入。
     func createPlaylist(named name: String, adding track: LibraryTrack?) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            errorMessage = "歌单名不能为空"
-            return
-        }
+        guard let trimmed = validatedPlaylistName(name) else { return }
         do {
             let playlist = try playlistRepository.create(name: trimmed)
             if let track {
                 try playlistRepository.addTrack(playlistId: playlist.id, trackId: track.id)
             }
-            playlists = try playlistRepository.list()
+            try reloadPlaylistList()
             statusMessage = "已新建歌单「\(trimmed)」"
         } catch {
             errorMessage = "新建歌单失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 重命名歌单。名字去空白后为空即拒绝（与新建同一条校验）。
+    func renamePlaylist(_ playlist: PlaylistInfo, to name: String) {
+        guard let trimmed = validatedPlaylistName(name) else { return }
+        guard trimmed != playlist.name else { return }
+        do {
+            try playlistRepository.rename(id: playlist.id, to: trimmed)
+            try reloadPlaylistList()
+            statusMessage = "已重命名为「\(trimmed)」"
+        } catch {
+            errorMessage = "重命名失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 删除歌单。调用方负责先弹确认；这里只做删除与列表刷新。
+    /// 若删的正是当前打开的歌单，顺手退回列表页，避免详情页停在已不存在的 id 上。
+    func deletePlaylist(_ playlist: PlaylistInfo) {
+        do {
+            try playlistRepository.delete(id: playlist.id)
+            try reloadPlaylistList()
+            if openPlaylistId == playlist.id { closePlaylist() }
+            statusMessage = "已删除歌单「\(playlist.name)」"
+        } catch {
+            errorMessage = "删除歌单失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 歌单名去空白校验：为空时置错误提示并返回 nil，让新建/重命名共用同一条规则。
+    /// 提示文案与 M2-T5 保持一致（既有测试断言了这条字符串）。
+    private func validatedPlaylistName(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty else { return trimmed }
+        errorMessage = "歌单名不能为空"
+        return nil
+    }
+
+    // MARK: 歌单详情
+
+    /// 打开歌单详情（读该歌单的曲目）。
+    func openPlaylist(_ playlist: PlaylistInfo) {
+        openPlaylistId = playlist.id
+        reloadOpenPlaylist()
+    }
+
+    /// 返回歌单列表页。
+    func closePlaylist() {
+        openPlaylistId = nil
+        playlistEntries = []
+    }
+
+    /// 重读当前打开歌单的曲目。歌单被删或未打开时清空详情态。
+    private func reloadOpenPlaylist() {
+        guard let openPlaylistId, playlists.contains(where: { $0.id == openPlaylistId }) else {
+            playlistEntries = []
+            return
+        }
+        do {
+            playlistEntries = try playlistRepository.entriesDetailed(playlistId: openPlaylistId)
+        } catch {
+            errorMessage = "读取歌单失败：\(error.localizedDescription)"
+            playlistEntries = []
+        }
+    }
+
+    /// 从打开的歌单移除一首曲目。
+    func removeFromOpenPlaylist(_ track: LibraryTrack) {
+        guard let openPlaylistId else { return }
+        do {
+            try playlistRepository.removeTrack(playlistId: openPlaylistId, trackId: track.id)
+            playlistEntries = try playlistRepository.entriesDetailed(playlistId: openPlaylistId)
+            try reloadPlaylistList()
+        } catch {
+            errorMessage = "移出歌单失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 把拖拽结果落到打开的歌单：先把内存里的顺序按拖拽移动，再把完整顺序交给仓库重排。
+    ///
+    /// 先算内存顺序是为了给仓库一份「权威的完整顺序」——仓库的 reorder 支持只传前几首，
+    /// 但拖拽的语义是「这一首插到这里」，传全量列表才与其一一对应，也不会依赖仓库的兜底顺序。
+    func moveInOpenPlaylist(fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard let openPlaylistId else { return }
+        let reordered = PlaylistOrdering.moved(playlistEntries, from: source, to: destination)
+        // 乐观更新：UI 立刻按新顺序重排，失败时再落回库里的真实顺序。
+        playlistEntries = reordered
+        do {
+            try playlistRepository.reorder(playlistId: openPlaylistId, trackIds: reordered.map(\.id))
+            try reloadPlaylistList()
+        } catch {
+            errorMessage = "调整顺序失败：\(error.localizedDescription)"
+            reloadOpenPlaylist()
+        }
+    }
+
+    // MARK: 收藏
+
+    /// 是否已收藏。列表行渲染星标时逐行查询（集合来自 favoriteTrackIds，无需查库）。
+    func isFavorited(_ track: LibraryTrack) -> Bool {
+        favoriteTrackIds.contains(track.id)
+    }
+
+    /// 切换一首曲目的收藏状态，并刷新收藏列表与星标集合。
+    func toggleFavorite(_ track: LibraryTrack) {
+        do {
+            let nowFavorited = try favoriteRepository.toggle(trackId: track.id)
+            let refreshed = try favoriteRepository.favorites()
+            favorites = refreshed
+            favoriteTrackIds = Set(refreshed.map(\.id))
+            // 「只看收藏」开着时取消收藏，该曲应从当前列表消失，聚合与搜索一起重算。
+            if onlyFavorites { invalidateSearchIndex() }
+            recomputeAggregates()
+            refreshSearchState()
+            statusMessage = nowFavorited ? "已收藏「\(track.title)」" : "已取消收藏「\(track.title)」"
+        } catch {
+            errorMessage = "收藏操作失败：\(error.localizedDescription)"
         }
     }
 
@@ -403,8 +603,10 @@ final class LibraryViewModel: ObservableObject {
     /// generation 与当前值不符说明曲目集已经换过，本次索引作废，直接返回 nil 让本轮放弃。
     private func librarySearchIndex(for generation: Int) async -> LibrarySearchIndex? {
         if let searchIndex { return searchIndex }
-        let task = searchIndexTask ?? Task.detached(priority: .userInitiated) { [tracks] in
-            LibrarySearchIndex(tracks: tracks)
+        // 建在「当前数据源」上：只看收藏时索引里只有收藏曲目，查询自然不会命中未收藏的歌。
+        let source = sourceTracks
+        let task = searchIndexTask ?? Task.detached(priority: .userInitiated) {
+            LibrarySearchIndex(tracks: source)
         }
         searchIndexTask = task
         let index = await task.value
@@ -434,7 +636,7 @@ final class LibraryViewModel: ObservableObject {
     /// 让搜索相关状态对齐当前曲目集：查询为空即全量，查询非空则重新结算一次。
     private func refreshSearchState() {
         guard isSearching else {
-            searchResults = tracks
+            searchResults = sourceTracks
             searchArtistGroups = artistGroups
             searchAlbumGroups = albumGroups
             return

@@ -607,6 +607,24 @@ public struct PlaylistRepository: Sendable {
         }
     }
 
+    /// 各歌单的曲目数（playlistId -> count）。
+    ///
+    /// 歌单列表页要显示「N 首」：逐行调 `entries` 会发起 N 次查询且把整张曲目表读出来；
+    /// 这里一条 GROUP BY 拿到全部计数，列表渲染只消费一个字典。
+    /// 没有条目的歌单不出现在结果里（调用方按 `?? 0` 读）。
+    public func entryCounts() throws -> [UUID: Int] {
+        try database.dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT playlistId, COUNT(*) AS count FROM \(DatabaseSchema.playlistEntry)
+                GROUP BY playlistId
+                """)
+            var counts: [UUID: Int] = [:]
+            counts.reserveCapacity(rows.count)
+            for row in rows { counts[row["playlistId"]] = row["count"] }
+            return counts
+        }
+    }
+
     // MARK: 曲目
 
     /// 把曲目追加到歌单末尾。
@@ -686,6 +704,20 @@ public struct PlaylistRepository: Sendable {
         }
     }
 
+    /// 歌单内容的「完整条目」版本：与 `entries` 同一条 JOIN 与排序，但返回 `LibraryTrack`，
+    /// 带上专辑/体积/格式/封面 —— 歌单详情页（M2-T7）要显示封面与音质角标，只投影播放字段不够。
+    /// 两者分工与 `LibraryRepository` 的 `allTracks` / `allTracksSorted` 一致。
+    public func entriesDetailed(playlistId: UUID) throws -> [LibraryTrack] {
+        try database.dbQueue.read { db in
+            try TrackRecord.fetchAll(db, sql: """
+                SELECT Track.* FROM Track
+                JOIN PlaylistEntry ON PlaylistEntry.trackId = Track.id
+                WHERE PlaylistEntry.playlistId = ?
+                ORDER BY PlaylistEntry.position
+                """, arguments: [playlistId]).map { $0.toLibraryTrack() }
+        }
+    }
+
     // MARK: 内部
 
     /// 追加位置：现有最大 position + 1；空歌单为 0。
@@ -741,5 +773,88 @@ public struct PlaylistRepository: Sendable {
             sql: "UPDATE \(DatabaseSchema.playlist) SET updatedAt = ? WHERE id = ?",
             arguments: [Date(), playlistId]
         )
+    }
+}
+
+// MARK: - 收藏
+
+/// Favorite 表的读写。
+///
+/// 幂等取向（本任务明确要求「收藏/取消收藏/幂等」三点都可断言）：
+///   - `favorite` 对已收藏的曲目**保持原 favoritedAt**，不因重复点击而把它顶到收藏列表最前
+///     （「按收藏时间倒序」的列表因此只在首次收藏时改变顺序，重复操作无副作用）；
+///   - `unfavorite` 对未收藏的曲目静默成功（删 0 行不是错误，UI 的开关式操作不需要先查存在性）。
+///
+/// 曲目不存在时 `favorite` 抛 `trackNotFound` 而不是让 SQLite 的外键约束报错：
+/// 与 `PlaylistRepository.addTrack` 保持一致的可归因错误，调用方不必解析 GRDB 的 DatabaseError。
+public struct FavoriteRepository: Sendable {
+
+    private let database: DatabaseProvider
+
+    public init(_ database: DatabaseProvider) {
+        self.database = database
+    }
+
+    /// 收藏一首曲目。已收藏时为幂等空操作（保留原 favoritedAt）。
+    /// - Returns: true 表示本次真的新增了收藏行；false 表示此前已收藏。
+    @discardableResult
+    public func favorite(trackId: UUID) throws -> Bool {
+        try database.dbQueue.write { db in
+            guard try TrackRecord.exists(db, key: trackId) else {
+                throw RepositoryError.trackNotFound(trackId)
+            }
+            if try FavoriteRecord.fetchOne(db, key: trackId) != nil { return false }
+            // 主键即 trackId：同一首歌最多一行，重复插入由 PK 约束挡住（这里已提前判过）。
+            try FavoriteRecord(trackId: trackId).insert(db)
+            return true
+        }
+    }
+
+    /// 取消收藏。曲目未被收藏时静默成功（删 0 行不是错误）。
+    public func unfavorite(trackId: UUID) throws {
+        try database.dbQueue.write { db in
+            _ = try FavoriteRecord.deleteOne(db, key: trackId)
+        }
+    }
+
+    /// 是否已收藏。
+    public func isFavorited(trackId: UUID) throws -> Bool {
+        try database.dbQueue.read { db in
+            try FavoriteRecord.exists(db, key: trackId)
+        }
+    }
+
+    /// 切换收藏状态，返回切换后的状态（true = 已收藏）。
+    /// UI 的星标按钮只调这一个方法，不必先读再写。
+    @discardableResult
+    public func toggle(trackId: UUID) throws -> Bool {
+        if try isFavorited(trackId: trackId) {
+            try unfavorite(trackId: trackId)
+            return false
+        }
+        try favorite(trackId: trackId)
+        return true
+    }
+
+    /// 全部收藏曲目，按收藏时间倒序（最近收藏在前）。
+    ///
+    /// 「只看收藏」列表与「收藏」子项都用它；返回 `LibraryTrack` 的理由与
+    /// `PlaylistRepository.entriesDetailed` 相同：列表页要封面与音质角标。
+    /// favoritedAt 相同时用 trackId 兜底，保证顺序跨查询稳定（测试可断言）。
+    public func favorites() throws -> [LibraryTrack] {
+        try database.dbQueue.read { db in
+            try TrackRecord.fetchAll(db, sql: """
+                SELECT Track.* FROM Track
+                JOIN Favorite ON Favorite.trackId = Track.id
+                ORDER BY Favorite.favoritedAt DESC, Track.id ASC
+                """).map { $0.toLibraryTrack() }
+        }
+    }
+
+    /// 已收藏曲目的 id 集合。列表行渲染星标时的批量查询入口（一次取全，避免逐行查库）。
+    public func favoritedTrackIds() throws -> Set<UUID> {
+        try database.dbQueue.read { db in
+            Set(try FavoriteRecord.fetchAll(db).map(\.trackId))
+        }
     }
 }

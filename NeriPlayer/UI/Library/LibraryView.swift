@@ -56,6 +56,8 @@ struct LibraryView: View {
     @State private var section: LibrarySection = .songs
     /// 右键「新建歌单…」时待加入的曲目；非 nil 即弹出命名面板。
     @State private var pendingNewPlaylistTrack: LibraryTrack?
+    /// 歌单管理面板是否打开。
+    @State private var isShowingPlaylists = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -86,6 +88,9 @@ struct LibraryView: View {
         .sheet(item: $pendingNewPlaylistTrack) { track in
             NewPlaylistSheet(track: track, viewModel: viewModel)
         }
+        .sheet(isPresented: $isShowingPlaylists) {
+            PlaylistListView(viewModel: viewModel)
+        }
     }
 
     // MARK: 顶栏
@@ -102,6 +107,19 @@ struct LibraryView: View {
             .frame(maxWidth: 300)
 
             Spacer(minLength: 8)
+
+            Toggle(isOn: $viewModel.onlyFavorites) {
+                Label("只看收藏", systemImage: "star")
+            }
+            .toggleStyle(.button)
+            .help("当前列表只显示已收藏的曲目")
+
+            Button {
+                isShowingPlaylists = true
+            } label: {
+                Label("歌单", systemImage: "music.note.list")
+            }
+            .help("管理歌单：新建、重命名、删除、排序")
 
             Button {
                 viewModel.addDirectoryAndSync()
@@ -167,6 +185,9 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if viewModel.isEmpty {
             emptyLibrary
+        } else if viewModel.isFavoritesFilterEmpty {
+            // 「只看收藏」开着但一首都没收藏：给专门的提示，而不是让用户以为曲目被删了。
+            noFavorites
         } else if viewModel.isSearching && viewModel.searchResults.isEmpty {
             noSearchResults
         } else {
@@ -292,6 +313,22 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// 「只看收藏」下的空态：提示去收藏，并给一键关闭开关的出口。
+    private var noFavorites: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "star")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("还没有收藏的曲目")
+                .font(.title3)
+            Text("在歌曲行上点星标，或右键选「添加到收藏」。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("显示全部曲目") { viewModel.onlyFavorites = false }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: 状态条
 
     private var statusBar: some View {
@@ -307,6 +344,11 @@ struct LibraryView: View {
             Text("共 \(viewModel.tracks.count) 首")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            if !viewModel.favorites.isEmpty {
+                Text("收藏 \(viewModel.favorites.count) 首")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -314,6 +356,9 @@ struct LibraryView: View {
 
     private var statusText: String {
         if let message = viewModel.statusMessage { return message }
+        if viewModel.onlyFavorites {
+            return "只看收藏：\(viewModel.favorites.count) 首"
+        }
         if viewModel.isSearching {
             switch section {
             case .songs: return "\(viewModel.searchResults.count) 首匹配"
@@ -371,7 +416,12 @@ struct LibraryTrackList: View {
     var body: some View {
         List(selection: $selectedTrackID) {
             ForEach(tracks) { track in
-                LibraryTrackRow(track: track, showsAlbum: showsAlbum)
+                LibraryTrackRow(
+                    track: track,
+                    showsAlbum: showsAlbum,
+                    isFavorited: viewModel.isFavorited(track),
+                    onToggleFavorite: { viewModel.toggleFavorite(track) }
+                )
                     .tag(Optional(track.id))
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) { play(track) }
@@ -380,13 +430,18 @@ struct LibraryTrackList: View {
         }
     }
 
-    /// 右键菜单：播放 / 下一首播放 / 加入歌单。
+    /// 右键菜单：播放 / 下一首播放 / 收藏 / 加入歌单。
     @ViewBuilder
     private func contextMenu(for track: LibraryTrack) -> some View {
         Button("播放") { play(track) }
             .disabled(appState.playbackStore == nil)
         Button("下一首播放") { enqueueNext(track) }
             .disabled(appState.playbackStore == nil)
+        Divider()
+        // 文案随状态切换：一个开关式的菜单项，比「添加到收藏/取消收藏」两个并列项少一次误点。
+        Button(viewModel.isFavorited(track) ? "取消收藏" : "添加到收藏") {
+            viewModel.toggleFavorite(track)
+        }
         Divider()
         Menu("加入歌单") {
             ForEach(viewModel.playlists) { playlist in
@@ -414,6 +469,10 @@ struct LibraryTrackRow: View {
 
     let track: LibraryTrack
     var showsAlbum: Bool = true
+    /// 是否已收藏；由调用方从视图模型的收藏集合读出（行本身不查库）。
+    var isFavorited: Bool = false
+    /// 点星标的回调；nil 表示这一处不需要收藏交互（例如歌单详情里的行由上层另给）。
+    var onToggleFavorite: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -427,6 +486,7 @@ struct LibraryTrackRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
+            favoriteStar
             if let format = track.format, !format.isEmpty {
                 Text(format.uppercased())
                     .font(.caption2)
@@ -441,6 +501,21 @@ struct LibraryTrackRow: View {
                 .frame(minWidth: 44, alignment: .trailing)
         }
         .padding(.vertical, 2)
+    }
+
+    /// 收藏星标。已收藏为实心黄星，未收藏为空心灰星（悬停提示说明动作）。
+    /// 没有回调时不渲染（保持纯展示行）。
+    @ViewBuilder
+    private var favoriteStar: some View {
+        if let onToggleFavorite {
+            Button(action: onToggleFavorite) {
+                Image(systemName: isFavorited ? "star.fill" : "star")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isFavorited ? Color.yellow : Color.secondary.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+            .help(isFavorited ? "取消收藏" : "添加到收藏")
+        }
     }
 
     private var subtitle: String {
