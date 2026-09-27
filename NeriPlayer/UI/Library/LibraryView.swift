@@ -1,11 +1,16 @@
 // LibraryView.swift
-// NeriPlayer macOS —— 媒体库 tab 的界面（移植规划 M2-T5）。
+// NeriPlayer macOS —— 媒体库 tab 的界面（移植规划 M2-T5、M2-T6）。
 //
-// 结构：顶部三段控件（歌曲 / 歌手 / 专辑）+ 右侧搜索 + 导入按钮；下方是列表区；底部状态条。
+// 结构：顶部三段控件（歌曲 / 歌手 / 专辑）+ 导入按钮；下方是搜索栏 + 列表区；底部状态条。
 //   - 歌曲：封面缩略图 + 标题 + 歌手 + 时长 + 格式角标，双击即播；
 //   - 歌手：按归一化歌手聚合，点进详情看该歌手全部曲目；
 //   - 专辑：按 (歌手, 专辑) 聚合，点进详情看整张专辑。
 // 所有列表共用同一套行视图与右键菜单（播放 / 下一首播放 / 加入歌单），避免三处各写一份。
+//
+// 搜索（M2-T6）：搜索栏放在列表区顶部（歌曲段就在其后），查询态由 LibraryViewModel 持有，
+// 三个维度共用同一批命中曲目 —— 切到歌手/专辑维度看到的是过滤后的聚合，不是全库聚合。
+// 视图本身不再自己过滤（M2-T5 时是本地 filter），因为拼音索引必须由拥有曲目集的视图模型
+// 在曲目变化时作废重建，放在视图里没法正确失效。
 //
 // 数据流：列表内容全部来自注入的 LibraryViewModel（它读 M2-T3/M2-T4 的库），
 // 播放入口来自环境的 AppState.playbackStore（M1-T5 的「入队即播」）。二者互不知道对方，
@@ -49,13 +54,14 @@ struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
 
     @State private var section: LibrarySection = .songs
-    @State private var searchText = ""
     /// 右键「新建歌单…」时待加入的曲目；非 nil 即弹出命名面板。
     @State private var pendingNewPlaylistTrack: LibraryTrack?
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            Divider()
+            searchBar
             Divider()
             content
             Divider()
@@ -97,8 +103,6 @@ struct LibraryView: View {
 
             Spacer(minLength: 8)
 
-            searchField
-
             Button {
                 viewModel.addDirectoryAndSync()
             } label: {
@@ -111,28 +115,47 @@ struct LibraryView: View {
         .padding(.vertical, 8)
     }
 
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("搜索标题、歌手、专辑", text: $searchText)
-                .textFieldStyle(.plain)
-                .frame(minWidth: 140, idealWidth: 200, maxWidth: 240)
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+    /// 搜索栏：位于列表区顶部，三个维度共用。
+    /// 输入即写入 viewModel.searchQuery（视图模型负责 200ms 防抖 + 后台建拼音索引），
+    /// 命中的曲目与聚合都从视图模型读，视图在这里不持有任何过滤状态。
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索标题、歌手、专辑，或拼音首字母（如 zl）", text: $viewModel.searchQuery)
+                    .textFieldStyle(.plain)
+                if viewModel.isSearchSettling {
+                    ProgressView().controlSize(.small)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("清除搜索")
+                if !viewModel.searchQuery.isEmpty {
+                    Button {
+                        viewModel.searchQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("清除搜索")
+                }
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(Capsule().stroke(Color(nsColor: .separatorColor)))
+            .frame(maxWidth: 460)
+
+            if viewModel.isSearching {
+                Text("\(viewModel.searchResults.count) 首匹配")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(Color(nsColor: .textBackgroundColor)))
-        .overlay(Capsule().stroke(Color(nsColor: .separatorColor)))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     // MARK: 内容区
@@ -144,11 +167,11 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if viewModel.isEmpty {
             emptyLibrary
-        } else if !searchText.isEmpty && filteredTracks.isEmpty {
+        } else if viewModel.isSearching && viewModel.searchResults.isEmpty {
             noSearchResults
         } else {
             switch section {
-            case .songs: trackList(filteredTracks)
+            case .songs: trackList(viewModel.searchResults)
             case .artists: artistsArea
             case .albums: albumsArea
             }
@@ -261,10 +284,10 @@ struct LibraryView: View {
 
     private var noSearchResults: some View {
         VStack(spacing: 8) {
-            Text("没有匹配「\(searchText)」的内容")
+            Text("没有匹配「\(viewModel.searchQuery)」的内容")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("清除搜索") { searchText = "" }
+            Button("清除搜索") { viewModel.searchQuery = "" }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -291,6 +314,13 @@ struct LibraryView: View {
 
     private var statusText: String {
         if let message = viewModel.statusMessage { return message }
+        if viewModel.isSearching {
+            switch section {
+            case .songs: return "\(viewModel.searchResults.count) 首匹配"
+            case .artists: return "\(viewModel.searchArtistGroups.count) 位歌手匹配"
+            case .albums: return "\(viewModel.searchAlbumGroups.count) 张专辑匹配"
+            }
+        }
         switch section {
         case .songs: return "双击任意一行开始播放"
         case .artists: return "\(viewModel.artistGroups.count) 位歌手"
@@ -300,25 +330,14 @@ struct LibraryView: View {
 
     // MARK: 数据
 
-    /// 搜索过滤后的曲目。标题/歌手/专辑任一命中即保留（大小写与变音符不敏感）。
-    private var filteredTracks: [LibraryTrack] {
-        let query = LibraryGrouping.normalize(searchText)
-        guard !query.isEmpty else { return viewModel.tracks }
-        return viewModel.tracks.filter { track in
-            [track.title, track.artist ?? "", track.album ?? ""].contains { field in
-                LibraryGrouping.normalize(field).contains(query)
-            }
-        }
-    }
-
-    /// 歌手聚合。搜索时对过滤结果重新聚合，保证三个维度看到的是同一批数据。
+    /// 歌手聚合：搜索态用视图模型的过滤聚合，否则用全量聚合。
     private var artistGroups: [ArtistGroup] {
-        searchText.isEmpty ? viewModel.artistGroups : LibraryGrouping.artistGroups(from: filteredTracks)
+        viewModel.isSearching ? viewModel.searchArtistGroups : viewModel.artistGroups
     }
 
     /// 专辑聚合，规则同上。
     private var albumGroups: [AlbumGroup] {
-        searchText.isEmpty ? viewModel.albumGroups : LibraryGrouping.albumGroups(from: filteredTracks)
+        viewModel.isSearching ? viewModel.searchAlbumGroups : viewModel.albumGroups
     }
 
     /// 错误提示的展示绑定：非 nil 即弹窗，关闭时清空。
