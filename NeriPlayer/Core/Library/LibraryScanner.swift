@@ -375,6 +375,15 @@ public final class LibraryScanner: @unchecked Sendable {
         return cache[path]
     }
 
+    /// 取某文件在缓存里的完整元数据（`Track` 的超集：含 album/封面字节/格式/体积）。
+    ///
+    /// 只读出口，供落库层（M2-T4 的 `LibrarySyncService`）在不二次读盘的前提下拿到
+    /// 封面与格式。返回 nil 的条件：该文件从未被本实例扫到，或本轮被剔除缓存。
+    /// 命中缓存的「复用」文件同样能取到（缓存条目里保留着上次读出的 metadata）。
+    public func metadata(for url: URL) -> AudioMetadata? {
+        cachedEntry(for: url.standardizedFileURL.path)?.metadata
+    }
+
     private func store(_ entry: CacheEntry, for path: String) {
         lock.lock()
         cache[path] = entry

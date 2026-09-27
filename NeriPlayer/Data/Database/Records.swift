@@ -130,9 +130,51 @@ public final class TrackRecord: Record {
         )
     }
 
+    /// 转成带库字段的对外值类型（M2-T4 的列表/排序/去重都从这里取数）。
+    ///
+    /// 与 `toTrack()` 的分工：`toTrack()` 只给播放链路需要的五个字段（队列/引擎不关心专辑与封面），
+    /// 本方法把 album/fileSize/format/coverPath/fingerprintMtime 一并透传出去。
+    /// createdAt 不外带：那是「首次入库时间」，属于库的元信息而非文件当前状态，写回时由调用方决定。
+    public func toLibraryTrack() -> LibraryTrack {
+        LibraryTrack(
+            id: id,
+            url: URL(string: url) ?? URL(fileURLWithPath: url),
+            title: title,
+            artist: artist,
+            album: album,
+            duration: durationSeconds,
+            // fileSize 列是 Double（便于 SQL 计算），Core 侧统一用 Int64 字节数。
+            fileSize: fileSize.isFinite ? Int64(fileSize.rounded()) : 0,
+            format: format,
+            coverPath: coverPath,
+            fingerprintMtime: fingerprintMtime
+        )
+    }
+
     /// URL 的落库归一化形式。UNIQUE(url) 去重、`trackByUrl` 查询都经这里，保证两侧一致。
     public static func urlString(for url: URL) -> String {
         url.absoluteString
+    }
+}
+
+public extension TrackRecord {
+
+    /// 由对外值类型构造（写库路径）。
+    ///
+    /// 直接复用已存在的 `init(track:album:fileSize:...)`：LibraryTrack 只是把同一批
+    /// 列换了个更全的值类型，落库字段一一对应，不新增列。
+    /// createdAt 显式传入：upsert 覆盖既有行时要保留原「首次入库时间」（重扫描不应改写它，
+    /// 否则按 createdAt 的去重裁决会在每次扫描后失真）。
+    convenience init(libraryTrack: LibraryTrack, createdAt: Date = Date()) {
+        self.init(
+            track: libraryTrack.track,
+            album: libraryTrack.album,
+            fileSize: Double(libraryTrack.fileSize),
+            format: libraryTrack.format,
+            fingerprintMtime: libraryTrack.fingerprintMtime,
+            coverPath: libraryTrack.coverPath,
+            createdAt: createdAt
+        )
     }
 }
 
