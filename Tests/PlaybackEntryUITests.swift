@@ -272,7 +272,7 @@ private final class TextReader: @unchecked Sendable {
     }
 
     /// 等到日志里出现 expected 这条文案。
-    // 20s 上限与全库套件一致：正常毫秒级命中，仅极端负载下兜底。
+    /// 20s 上限与全库套件一致：正常毫秒级命中，仅极端负载下兜底。
     func waitForText(_ expected: String, seconds: Double = 20) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
