@@ -7,6 +7,10 @@
 // 选中项持久化：通过 SettingsStore 的 SettingsKeys.lastSelectedTab 保存/恢复上次选中的 tab；
 // 存储值缺失或无法识别时回落到 .home。写回放在 Binding 的 setter 里（而非 onChange），
 // 这样在 macOS 13 部署目标下不依赖 onChange(of:initial:) 的新签名，也不产生弃用警告。
+//
+// M2-T8：窗口底部挂一条 PlaybackStatusBar（跨 tab 常驻），显示当前播放曲名与状态。
+// 放在这里而不是每个 tab 各挂一条：播放是应用级状态，切 tab 不该让状态条一闪一闪；
+// 点击状态条切回媒体库 tab —— 播放入口都在媒体库，这一跳把「现在在放什么」和「去哪儿换歌」连起来。
 
 import SwiftUI
 
@@ -67,10 +71,17 @@ struct MainContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detail
+        // 上下两段：主内容（侧栏 + 详情）占满剩余高度，播放状态条固定在窗口底部。
+        // 状态条自身在「无当前曲」时不渲染，VStack 的高度差正好把主内容补满。
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                detail
+            }
+            // 走 selectionBinding 而不是直接改 @State：点击状态条同样要把 tab 写进设置存储，
+            // 否则重启后会回到上一次用侧栏选的 tab，而不是这条状态条带来的一次跳转。
+            PlaybackStatusBar(onActivate: { selectionBinding.wrappedValue = .library })
         }
         .frame(minWidth: 720, minHeight: 480)
     }

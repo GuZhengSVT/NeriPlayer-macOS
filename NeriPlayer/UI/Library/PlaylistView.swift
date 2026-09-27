@@ -13,6 +13,10 @@
 // 转换放在 LibraryViewModel.moveInOpenPlaylist（内存顺序 → 仓库 reorder），视图不碰数组搬移。
 // 双击播放整单走 PlaybackStateStore.setQueue(tracks, startIndex:)，startIndex 即被点行下标，
 // 于是进队列后「上一首/下一首」的行为与队列语义一致，而不是只播一首。
+//
+// M2-T8：右键菜单与歌手/专辑详情对齐 —— 单曲项是「播放 / 下一首播放」，整单项是
+// 「播放全部 / 随机播放」。随机起点仍走 PlaybackEntry.shuffle（整单入队 + 随机跳转），
+// 与详情页同一条路径，因此「随机出来的那首一定属于这个歌单」这条不变量三处一致。
 
 import AppKit
 import SwiftUI
@@ -228,6 +232,9 @@ struct PlaylistDetailView: View {
 
             Spacer(minLength: 8)
 
+            Button("随机播放") { shuffleAll() }
+                .disabled(appState.playbackStore == nil || viewModel.playlistEntries.isEmpty)
+
             Button("播放全部") { playAll() }
                 .disabled(appState.playbackStore == nil || viewModel.playlistEntries.isEmpty)
         }
@@ -250,6 +257,12 @@ struct PlaylistDetailView: View {
                     Button("播放") { play(from: index) }
                         .disabled(appState.playbackStore == nil)
                     Button("下一首播放") { appState.playbackStore?.enqueueNext(track.track) }
+                        .disabled(appState.playbackStore == nil)
+                    Divider()
+                    // 整单入口：与头部按钮同语义，方便在任意一行就地换整单。
+                    Button("播放全部") { playAll() }
+                        .disabled(appState.playbackStore == nil)
+                    Button("随机播放") { shuffleAll() }
                         .disabled(appState.playbackStore == nil)
                     Divider()
                     Button("从歌单移除") { viewModel.removeFromOpenPlaylist(track) }
@@ -285,6 +298,12 @@ struct PlaylistDetailView: View {
 
     private func playAll() {
         play(from: 0)
+    }
+
+    /// 随机播放整单：整单先入队，再随机取一个起点跳过去。
+    private func shuffleAll() {
+        guard let store = appState.playbackStore else { return }
+        PlaybackEntry.shuffle(viewModel.playlistEntries.map(\.track), store: store)
     }
 }
 

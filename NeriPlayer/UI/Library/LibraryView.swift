@@ -21,6 +21,9 @@
 //
 // 边界（不做）：歌单详情页、播放队列的编辑 UI、滚动的性能专项优化（验收要求 1000+ 曲目 60fps，
 // 用 Instruments 验证；本任务只保证行视图轻量、无每帧计算）。
+//
+// M2-T8：播放入口打通。歌手/专辑详情头部补「随机播放」（整组入队 + 随机起点，见
+// PlaybackEntry），底部补 PlaybackStatusBar（订阅 PlaybackStateStore 快照显示当前曲）。
 
 import AppKit
 import SwiftUI
@@ -67,7 +70,7 @@ struct LibraryView: View {
             Divider()
             content
             Divider()
-            statusBar
+            LibraryStatusBar(viewModel: viewModel, section: section)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("媒体库")
@@ -329,50 +332,6 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: 状态条
-
-    private var statusBar: some View {
-        HStack(spacing: 8) {
-            if viewModel.isSyncing {
-                ProgressView().controlSize(.small)
-            }
-            Text(statusText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Text("共 \(viewModel.tracks.count) 首")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            if !viewModel.favorites.isEmpty {
-                Text("收藏 \(viewModel.favorites.count) 首")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-    }
-
-    private var statusText: String {
-        if let message = viewModel.statusMessage { return message }
-        if viewModel.onlyFavorites {
-            return "只看收藏：\(viewModel.favorites.count) 首"
-        }
-        if viewModel.isSearching {
-            switch section {
-            case .songs: return "\(viewModel.searchResults.count) 首匹配"
-            case .artists: return "\(viewModel.searchArtistGroups.count) 位歌手匹配"
-            case .albums: return "\(viewModel.searchAlbumGroups.count) 张专辑匹配"
-            }
-        }
-        switch section {
-        case .songs: return "双击任意一行开始播放"
-        case .artists: return "\(viewModel.artistGroups.count) 位歌手"
-        case .albums: return "\(viewModel.albumGroups.count) 张专辑"
-        }
-    }
-
     // MARK: 数据
 
     /// 歌手聚合：搜索态用视图模型的过滤聚合，否则用全量聚合。
@@ -584,6 +543,8 @@ struct ArtistDetailView: View {
     let group: ArtistGroup
     let viewModel: LibraryViewModel
     let onNewPlaylist: (LibraryTrack) -> Void
+    /// 随机播放的取数过程是否可复现（默认真随机；测试时打开）。
+    var isShuffleSeedFixed = false
 
     @EnvironmentObject private var appState: AppState
 
@@ -596,7 +557,8 @@ struct ArtistDetailView: View {
                 backHelp: "返回歌手列表",
                 onBack: { viewModel.selectedArtist = nil },
                 onPlayAll: { playAll() },
-                isPlayAllEnabled: appState.playbackStore != nil && !tracks.isEmpty
+                onShuffle: { shuffleAll() },
+                isPlayEnabled: appState.playbackStore != nil && !tracks.isEmpty
             )
             Divider()
             LibraryTrackList(
@@ -610,7 +572,14 @@ struct ArtistDetailView: View {
     private var tracks: [LibraryTrack] { viewModel.tracks(for: group) }
 
     private func playAll() {
-        appState.playbackStore?.setQueue(tracks.map(\.track))
+        appState.playbackStore?.setQueue(tracks.map(\.track), startIndex: 0)
+    }
+
+    /// 随机播放：整组先全量入队，再从队列里挑一个随机起点跳过去。
+    /// 取舍说明见 PlaybackEntry 头注释（不切换 queue.mode）。
+    private func shuffleAll() {
+        guard let store = appState.playbackStore else { return }
+        PlaybackEntry.shuffle(tracks.map(\.track), store: store, isSeedFixed: isShuffleSeedFixed)
     }
 }
 
@@ -622,6 +591,8 @@ struct AlbumDetailView: View {
     let group: AlbumGroup
     let viewModel: LibraryViewModel
     let onNewPlaylist: (LibraryTrack) -> Void
+    /// 随机播放的取数过程是否可复现（默认真随机；测试时打开）。
+    var isShuffleSeedFixed = false
 
     @EnvironmentObject private var appState: AppState
 
@@ -635,7 +606,8 @@ struct AlbumDetailView: View {
                 backHelp: "返回专辑列表",
                 onBack: { viewModel.selectedAlbum = nil },
                 onPlayAll: { playAll() },
-                isPlayAllEnabled: appState.playbackStore != nil && !tracks.isEmpty
+                onShuffle: { shuffleAll() },
+                isPlayEnabled: appState.playbackStore != nil && !tracks.isEmpty
             )
             Divider()
             LibraryTrackList(
@@ -650,13 +622,19 @@ struct AlbumDetailView: View {
     private var tracks: [LibraryTrack] { viewModel.tracks(for: group) }
 
     private func playAll() {
-        appState.playbackStore?.setQueue(tracks.map(\.track))
+        appState.playbackStore?.setQueue(tracks.map(\.track), startIndex: 0)
+    }
+
+    /// 随机播放：与歌手详情同一条路径，起点从该专辑曲目里随机取。
+    private func shuffleAll() {
+        guard let store = appState.playbackStore else { return }
+        PlaybackEntry.shuffle(tracks.map(\.track), store: store, isSeedFixed: isShuffleSeedFixed)
     }
 }
 
 // MARK: - 详情页头
 
-/// 歌手/专辑详情共用的头部：返回按钮 + 图标或封面 + 标题 + 副标题 + 「播放全部」。
+/// 歌手/专辑详情共用的头部：返回按钮 + 图标或封面 + 标题 + 副标题 + 「播放全部 / 随机播放」。
 struct LibraryDetailHeader: View {
 
     let iconSystemName: String?
@@ -666,7 +644,9 @@ struct LibraryDetailHeader: View {
     let backHelp: String
     let onBack: () -> Void
     let onPlayAll: () -> Void
-    let isPlayAllEnabled: Bool
+    let onShuffle: () -> Void
+    /// 整组为空或播放集成未就绪时为 false：两个按钮一起禁用（空库/空歌单防呆）。
+    let isPlayEnabled: Bool
 
     init(
         iconSystemName: String?,
@@ -676,7 +656,8 @@ struct LibraryDetailHeader: View {
         backHelp: String,
         onBack: @escaping () -> Void,
         onPlayAll: @escaping () -> Void,
-        isPlayAllEnabled: Bool
+        onShuffle: @escaping () -> Void,
+        isPlayEnabled: Bool
     ) {
         self.iconSystemName = iconSystemName
         self.iconCoverPath = iconCoverPath
@@ -685,7 +666,8 @@ struct LibraryDetailHeader: View {
         self.backHelp = backHelp
         self.onBack = onBack
         self.onPlayAll = onPlayAll
-        self.isPlayAllEnabled = isPlayAllEnabled
+        self.onShuffle = onShuffle
+        self.isPlayEnabled = isPlayEnabled
     }
 
     var body: some View {
@@ -718,8 +700,16 @@ struct LibraryDetailHeader: View {
 
             Spacer(minLength: 8)
 
-            Button("播放全部", action: onPlayAll)
-                .disabled(!isPlayAllEnabled)
+            // 两个按钮共用一次可用性判定：组里没有曲目（或播放集成未就绪）时都禁用。
+            Button(action: onPlayAll) {
+                Label("播放全部", systemImage: "play.fill")
+            }
+            .disabled(!isPlayEnabled)
+
+            Button(action: onShuffle) {
+                Label("随机播放", systemImage: "shuffle")
+            }
+            .disabled(!isPlayEnabled)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
