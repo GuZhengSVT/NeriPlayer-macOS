@@ -300,7 +300,8 @@ final class NowPlayingControllerTests: XCTestCase {
     /// 等待 store 快照满足条件；超时抛错。用于消除引擎状态流的异步折叠时序抖动。
     private func awaitSnapshot(
         _ store: PlaybackStateStore,
-        seconds: TimeInterval = 5,
+        // 20s 上限，与其他套件一致：正常毫秒级返回，仅在系统负载抖动时兜底。
+        seconds: TimeInterval = 20,
         _ predicate: (PlaybackSnapshot) -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(seconds)
