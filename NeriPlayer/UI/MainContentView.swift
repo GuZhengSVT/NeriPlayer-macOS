@@ -2,6 +2,7 @@
 // M0-T6：主窗口 + 侧栏导航骨架。左侧 Sidebar 列出五个顶层导航项（首页/探索/媒体库/下载/设置），
 // 右侧详情区渲染选中项对应的占位视图。本任务只做骨架，详情区不含任何业务功能，
 // 真实内容由后续里程碑任务替换。
+// M2-T5：媒体库 tab 的占位视图替换为 LibraryView（数据来自 AppState.libraryViewModel）。
 //
 // 选中项持久化：通过 SettingsStore 的 SettingsKeys.lastSelectedTab 保存/恢复上次选中的 tab；
 // 存储值缺失或无法识别时回落到 .home。写回放在 Binding 的 setter 里（而非 onChange），
@@ -69,9 +70,19 @@ struct MainContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
+            detail
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+
+    /// 详情区。媒体库 tab 分派到真实视图，其余 tab 仍是占位。
+    @ViewBuilder
+    private var detail: some View {
+        if selection == .library, let viewModel = appState.libraryViewModel {
+            LibraryView(viewModel: viewModel)
+        } else {
+            PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
+        }
     }
 
     /// 左侧导航栏。selection 用自定义 Binding，写入时顺带持久化。

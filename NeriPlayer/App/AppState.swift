@@ -26,6 +26,10 @@ public final class AppState: ObservableObject {
     @Published public private(set) var playbackStore: PlaybackStateStore?
     /// 媒体键与 Now Playing 控制器（M1-T6）。仅随 playbackStore 一起存在。
     private var nowPlaying: NowPlayingController?
+    /// 媒体库视图模型（M2-T5）。启动时打开数据库后创建；打开失败时为 nil。
+    @Published private(set) var libraryViewModel: LibraryViewModel?
+    /// 媒体库数据库连接（M2-T3）。与 libraryViewModel 同生命周期；本对象关闭即释放。
+    private var libraryDatabase: DatabaseProvider?
     /// 应用退出通知观察者；stopPlaybackIntegration 时注销。
     private var terminateObserver: NSObjectProtocol?
 
@@ -53,6 +57,25 @@ public final class AppState: ObservableObject {
     }
 
     // MARK: - 播放集成（M1-T6）
+
+    /// 打开媒体库数据库并创建视图模型（M2-T5）。幂等：已就绪则直接返回。
+    ///
+    /// 放在 AppState 的理由与播放集成一致：数据库连接与视图模型都要与进程同寿，
+    /// 由 App 结构体的 @StateObject 持有才不会被窗口重建带走。失败只记录日志并保持 nil，
+    /// 媒体库 tab 会回落占位视图，不影响其余功能（与 libmpv 缺失的降级策略一致）。
+    @MainActor
+    public func startLibrary() {
+        guard libraryViewModel == nil else { return }
+        do {
+            let database = try DatabaseProvider()
+            try database.setupIfNeeded()
+            libraryDatabase = database
+            libraryViewModel = LibraryViewModel(database: database)
+            Log.db.info("媒体库已就绪：\(database.databaseURL.path, privacy: .public)")
+        } catch {
+            Log.db.error("媒体库初始化失败（媒体库 tab 不可用）：\(error.localizedDescription)")
+        }
+    }
 
     /// 启动播放集成：创建 PlaybackStateStore，接入媒体键与 Now Playing，并挂上退出清理。
     /// 幂等：已启动则直接返回。创建失败（如 libmpv 缺失）只记录日志，不改安全模式。
