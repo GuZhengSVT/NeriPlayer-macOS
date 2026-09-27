@@ -132,13 +132,14 @@ public final class DatabaseProvider: @unchecked Sendable {
 
     // MARK: - 迁移定义
 
-    /// 登记全部迁移。当前只有 v1（M2-T3 的四张核心表 + 索引）。
+    /// 登记全部迁移。当前有 v1（M2-T3 的四张核心表 + 索引）与 v2（M3-T1 的三张持久化表 + 索引）。
     ///
     /// 迁移标识用「v1」而非时间戳：这是从零开始的新库（无历史迁移需要区分先后），
     /// 递增版本号更好读也更好在测试里断言。后续 M3+ 依次追加「v2」「v3」。
     private static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1", migrate: migrateV1)
+        migrator.registerMigration("v2", migrate: migrateV2)
         return migrator
     }
 
@@ -213,6 +214,87 @@ public final class DatabaseProvider: @unchecked Sendable {
         )
     }
 
+    /// v2：建播放历史 / 播放统计 / 播放器现场三张表与索引（移植规划 M3-T1）。
+    ///
+    /// 与 v1 的关系：v1 的 Track/Playlist/PlaylistEntry/Favorite 一张不动，本迁移只做 CREATE，
+    /// 因此 v1 → v2 升级是纯增量，既有数据不会被重建或改写（单测 testV1ToV2MigrationPreservesV1Data 断言）。
+    ///
+    /// 语义参考 Android 原库 data/stats 与 schemas/18.json，但按 macOS 侧的数据模型重做：
+    ///   - PlayHistory：一首歌一行（trackId 主键），外键级联到 Track —— 曲目被删则历史随之消失，
+    ///     不留指向不存在文件的孤儿行；按 playedAt 倒序查询即「最近播放」；
+    ///   - PlaybackStats：一首歌一行累计值（次数/时长/首次与最近播放时间）；
+    ///   - PlaybackStatsDailyBucket：按自然日的桶，(dayStart, trackId) 复合主键保证「同一天同一首一行」；
+    ///   - PlayerState：单行现场表（id 恒为 1），队列以 JSON 列整体存取。
+    ///
+    /// 统计相关表为什么不去存标题/歌手/专辑快照：macOS 侧 Track 表就是权威元数据，且有外键级联
+    /// 保证一致性；查询时 JOIN Track 取展示字段，避免元数据在两张表里各存一份后可能不一致。
+    private static let migrateV2: @Sendable (Database) throws -> Void = { db in
+        try db.create(table: DatabaseSchema.playHistory) { table in
+            // trackId 直接做主键：一首歌最多一行历史（重复播放只刷新时间与记忆位置）。
+            table.primaryKey("trackId", .text)
+                .references(DatabaseSchema.track, onDelete: .cascade)
+            table.column("playedAt", .datetime).notNull()
+            // 记忆播放位置（秒）。0 表示未记录或从头播。
+            table.column("resumePositionSeconds", .double).notNull().defaults(to: 0)
+        }
+
+        try db.create(table: DatabaseSchema.playbackStats) { table in
+            table.primaryKey("trackId", .text)
+                .references(DatabaseSchema.track, onDelete: .cascade)
+            table.column("totalListenSeconds", .double).notNull().defaults(to: 0)
+            table.column("playCount", .integer).notNull().defaults(to: 0)
+            // 首次/最近播放时间可为 NULL：统计行可能先建立（例如刚播放尚未达到计数阈值）。
+            table.column("firstPlayedAt", .datetime)
+            table.column("lastPlayedAt", .datetime)
+        }
+
+        try db.create(table: DatabaseSchema.playbackStatsDailyBucket) { table in
+            // 复合主键 (dayStart, trackId)：桶键 + 曲目唯一确定一行。
+            table.primaryKey(["dayStart", "trackId"])
+            table.column("dayStart", .datetime).notNull()
+            table.column("trackId", .text).notNull()
+                .references(DatabaseSchema.track, onDelete: .cascade)
+            table.column("totalListenSeconds", .double).notNull().defaults(to: 0)
+            table.column("playCount", .integer).notNull().defaults(to: 0)
+            table.column("firstPlayedAt", .datetime)
+            table.column("lastPlayedAt", .datetime)
+        }
+
+        // 单行现场表：id 恒为 1（Repository 只用这一行），删除重建时也只会有一行。
+        try db.create(table: DatabaseSchema.playerState) { table in
+            table.primaryKey("id", .integer)
+            // 当前索引；空队列为 NULL（与 QueueState 的不变式一致）。
+            table.column("currentIndex", .integer)
+            table.column("position", .double).notNull().defaults(to: 0)
+            table.column("mode", .text).notNull()
+            // 队列与随机序列各存一列 JSON：整体读写、行级原子，不会出现写了一半的队列。
+            table.column("queue", .text).notNull()
+            table.column("shuffleOrder", .text).notNull().defaults(to: "[]")
+            table.column("updatedAt", .datetime).notNull()
+        }
+
+        // 索引：覆盖本阶段已明确的查询路径。
+        // 历史按时间倒序取整表（最近播放列表），单列索引即可让 ORDER BY 走索引扫描。
+        try db.create(
+            index: "index_PlayHistory_playedAt",
+            on: DatabaseSchema.playHistory,
+            columns: ["playedAt"]
+        )
+        // 统计按「最近播放」倒序取；主键 trackId 已覆盖按曲目点查。
+        try db.create(
+            index: "index_PlaybackStats_lastPlayedAt",
+            on: DatabaseSchema.playbackStats,
+            columns: ["lastPlayedAt"]
+        )
+        // 每日桶按曲目横跨多天查询（(dayStart, trackId) 主键前缀只有 dayStart，帮不上 trackId 反查）；
+        // 复合索引把「某首歌的时间序列」变成连续区间扫描。
+        try db.create(
+            index: "index_PlaybackStatsDailyBucket_trackId_dayStart",
+            on: DatabaseSchema.playbackStatsDailyBucket,
+            columns: ["trackId", "dayStart"]
+        )
+    }
+
     // MARK: - 目录
 
     /// 确保库目录存在。
@@ -241,4 +323,12 @@ public enum DatabaseSchema {
     public static let playlist = "Playlist"
     public static let playlistEntry = "PlaylistEntry"
     public static let favorite = "Favorite"
+    /// M3-T1：播放历史（一首歌一行）。
+    public static let playHistory = "PlayHistory"
+    /// M3-T1：播放统计累计值（一首歌一行）。
+    public static let playbackStats = "PlaybackStats"
+    /// M3-T1：播放统计每日桶（(dayStart, trackId) 复合主键）。
+    public static let playbackStatsDailyBucket = "PlaybackStatsDailyBucket"
+    /// M3-T1：播放器现场单行表（id 恒为 1）。
+    public static let playerState = "PlayerState"
 }
