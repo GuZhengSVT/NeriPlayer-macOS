@@ -6,6 +6,10 @@
 #   actionlint .github/workflows/ci.yml
 # 或（没装 actionlint 时）：
 #   python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"
+#
+# 关于 Vendor/mpv：libmpv 的头文件与动态库按 M1-T1 决定不入库（见 .gitignore
+# 的 /Vendor/mpv/），本地靠 Tools/fetch-mpv.sh 布置。CI 的 checkout 是干净的，
+# 因此必须在 swift build 之前跑同一条脚本，否则 CMpv 编译时找不到 mpv/client.h。
 
 name: CI
 
@@ -64,6 +68,12 @@ jobs:
       - name: Install SwiftLint (optional)
         continue-on-error: true
         run: brew install swiftlint
+
+      # Vendor 化 libmpv：与本地同一条脚本（内含 brew install mpv 的兜底）。
+      # 必须在 swift build 之前执行 —— CMpv 的 public header 会 #include <mpv/client.h>，
+      # 而 Vendor/mpv/ 不入库，干净 checkout 上不存在。脚本本身幂等，已存在产物时直接跳过。
+      - name: Vendor libmpv (fetch-mpv.sh)
+        run: Tools/fetch-mpv.sh
 
       - name: swift build
         run: swift build
