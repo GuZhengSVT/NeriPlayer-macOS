@@ -168,12 +168,18 @@ final class PlaybackEntryUITests: XCTestCase {
         XCTAssertNil(reader.lastText, "订阅时队列为空，不该有状态文案")
 
         store.playTrack(track)
+        // 先轮询 store 快照确认状态落地（直接读，不经流），再等状态条文案：
+        // 文案依赖 store 内部消费任务异步发布，直接等文案在极端负载下会与
+        // 出站流的 newest-1 缓冲竞争（实测偶发 20s 内只见「已停止」）。
+        try await waitForSnapshot(store) { $0.currentTrack?.id == track.id && !$0.isCoreIdle }
         try await reader.waitForText("正在播放 · 夜曲0 — 夜曲")
 
         store.togglePlayPause()
+        try await waitForSnapshot(store) { $0.isPaused }
         try await reader.waitForText("已暂停 · 夜曲0 — 夜曲")
 
         store.togglePlayPause()
+        try await waitForSnapshot(store) { !$0.isPaused }
         try await reader.waitForText("正在播放 · 夜曲0 — 夜曲")
 
         // 只有位置变化时文案不变：等待这次 seek 的快照落地，文案仍是刚才那条。
@@ -181,6 +187,20 @@ final class PlaybackEntryUITests: XCTestCase {
         store.seek(to: 12)
         try await reader.waitForCount(countBeforeSeek + 1)
         XCTAssertEqual(reader.lastText, "正在播放 · 夜曲0 — 夜曲")
+    }
+
+    /// 轮询 store 快照直到条件成立（与其他套件的 waitForSnapshot 同语义）。
+    private func waitForSnapshot(
+        _ store: PlaybackStateStore,
+        seconds: Double = 20,
+        until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if predicate(store.snapshot) { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw PlaybackEntryTestError.waitTimeout(expected: "snapshot condition", observed: [])
     }
 
     /// 停止后状态条仍在（当前曲保留），但标签变为「已停止」。
@@ -253,7 +273,8 @@ private final class TextReader: @unchecked Sendable {
     }
 
     /// 等到日志里出现 expected 这条文案。
-    func waitForText(_ expected: String, seconds: Double = 8) async throws {
+    // 20s 上限与全库套件一致：正常毫秒级命中，仅极端负载下兜底。
+    func waitForText(_ expected: String, seconds: Double = 20) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if recorded().contains(expected) { return }
@@ -263,7 +284,7 @@ private final class TextReader: @unchecked Sendable {
     }
 
     /// 等到日志条数达到 expected（用于「状态条确实又收到过一次快照」这类断言）。
-    func waitForCount(_ expected: Int, seconds: Double = 8) async throws {
+    func waitForCount(_ expected: Int, seconds: Double = 20) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if count >= expected { return }
