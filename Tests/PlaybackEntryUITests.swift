@@ -189,7 +189,6 @@ final class PlaybackEntryUITests: XCTestCase {
         XCTAssertEqual(reader.lastText, "正在播放 · 夜曲0 — 夜曲")
     }
 
-    /// 轮询 store 快照直到条件成立（与其他套件的 waitForSnapshot 同语义）。
     private func waitForSnapshot(
         _ store: PlaybackStateStore,
         seconds: Double = 20,
