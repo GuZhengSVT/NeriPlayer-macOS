@@ -24,8 +24,9 @@
 // `require(end >= start)` 也改成钳制（见 KaraokeModel.swift）—— 一个音节坏掉就让整首歌没歌词，
 // 对播放器是不可接受的降级。
 //
-// 未移植：原库 model/synced/UncheckedSyncedLine（允许 end < start 的过渡类型）。它在原模块里
-// 只有定义、没有任何引用（grep 全模块确认），移植后也没有消费者，故不搬。
+// `UncheckedSyncedLine`（原库同文件的过渡类型，允许 end < start）也一并移植，但不进
+// `LyricsLine` 联合类型：原模块里没有任何解析器产出它（全模块 grep 确认），加 case 只会让
+// 所有 switch 多出一条走不到的分支；将来真有消费者时再加，编译器会把要补的地方逐个点出来。
 
 import Foundation
 
@@ -72,6 +73,41 @@ public struct SyncedLine: LyricsTimedLine {
         self.translation = translation
         self.start = start
         self.end = end
+    }
+}
+
+/// 逐行歌词的「未校验」版本（原库 `model/synced/SyncedLine.kt` 的 `UncheckedSyncedLine`）。
+///
+/// 原库把它当解析中途的过渡类型用：中途允许 `end < start`，最后再 `toSyncedLine()` 收敛。
+/// 移植后它与 `SyncedLine` 的差别只剩类型名 —— Swift 的 `SyncedLine` 构造本来就不抛错，
+/// 两者的 `duration` 钳制口径完全一致。
+public struct UncheckedSyncedLine: LyricsTimedLine {
+
+    /// 歌词正文。
+    public var content: String
+
+    /// 译文，没有则为 nil。
+    public var translation: String?
+
+    /// 起始时间，毫秒。
+    public var start: Int
+
+    /// 结束时间，毫秒。
+    public var end: Int
+
+    /// 时长，毫秒，钳到非负（原库 `takeIf { it >= 0 } ?: 0`，与 `SyncedLine` 同口径）。
+    public var duration: Int { max(end - start, 0) }
+
+    public init(content: String, translation: String? = nil, start: Int, end: Int) {
+        self.content = content
+        self.translation = translation
+        self.start = start
+        self.end = end
+    }
+
+    /// 收敛成校验过的逐行歌词（原库 `toSyncedLine()`）。
+    public func toSyncedLine() -> SyncedLine {
+        SyncedLine(content: content, translation: translation, start: start, end: end)
     }
 }
 

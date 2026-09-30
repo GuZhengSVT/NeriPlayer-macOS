@@ -11,9 +11,8 @@
 // 原库这两个函数是 `String`/`Int` 的扩展；这里收进 `LyricsTime` 命名空间，
 // 免得给全工程的 String / Int 加容易撞名的方法（移植时读作 `LyricsTime.parseAsTime(x)`）。
 //
-// 未移植：原库 `String.isDigitsOnly()`，它只被尚未移植的 LyricifySyllableParser 使用。
-// 注意它是 Unicode 语义的 `Char.isDigit()`（阿拉伯数字等也算），将来移植时不能写成
-// `"0"..."9"` 的 ASCII 判断。
+// `String.isDigitsOnly()`（原库同一文件）也一并移植成 `LyricsTime.isDigitsOnly(_:)`，
+// 它只被 Lyricify 解析器调用；注意它是 Unicode 语义的 `Char.isDigit()`，不能写成 ASCII 区间。
 
 import Foundation
 
@@ -89,5 +88,17 @@ public enum LyricsTime {
         default: ms = "\(millis)"
         }
         return "\(m):\(s).\(ms)"
+    }
+
+    /// 是否全部由「数字字符」组成（原库 `utils/TimeUtils.kt` 的 `String.isDigitsOnly()`）。
+    ///
+    /// 原库是 `all { it.isDigit() }`，**Unicode 语义**：`Char.isDigit()` 等价于 Unicode 的
+    /// `Nd`(Decimal_Number) 类别，阿拉伯-印度数字 `٣`、天城文 `३` 都算数字 —— 不能写成
+    /// `"0"..."9"` 的 ASCII 区间判断。
+    ///
+    /// 空串返回 true：Kotlin `all {}` 对空集合为真，这里保持同一口径（调用点是 Lyricify 的
+    /// `(\d+)` 捕获组，必然非空，所以这是个只为语义对齐而存在的边界）。
+    public static func isDigitsOnly(_ string: String) -> Bool {
+        string.allSatisfy { $0.isNumber }
     }
 }

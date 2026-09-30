@@ -92,6 +92,16 @@ final class LyricsTimeTests: XCTestCase {
         XCTAssertEqual(LyricsTime.formatted(62_500), "01:02.500")
     }
 
+    func testIsDigitsOnlyIsUnicodeAware() {
+        XCTAssertTrue(LyricsTime.isDigitsOnly("0123456789"))
+        // Kotlin `Char.isDigit()` 是 Nd 类别，阿拉伯-印度数字也算数字
+        XCTAssertTrue(LyricsTime.isDigitsOnly("\u{0663}"))
+        // 空串与原库 `all {}` 一致返回 true（调用点的 `(\d+)` 捕获组保证非空）
+        XCTAssertTrue(LyricsTime.isDigitsOnly(""))
+        XCTAssertFalse(LyricsTime.isDigitsOnly("12a"))
+        XCTAssertFalse(LyricsTime.isDigitsOnly("-1"))
+    }
+
     func testFormattedNegativeClampsToZero() {
         XCTAssertEqual(LyricsTime.formatted(-1), "00:00.000")
     }
@@ -271,6 +281,22 @@ final class LyricsLineModelTests: XCTestCase {
     func testSyncedLineDurationClampsNegativeToZero() {
         let line = SyncedLine(content: "x", start: 1_000, end: 500)
         XCTAssertEqual(line.duration, 0)
+    }
+
+    func testUncheckedSyncedLineConvergesToSyncedLine() {
+        let unchecked = UncheckedSyncedLine(content: "x", translation: "t", start: 100, end: 300)
+        XCTAssertEqual(unchecked.duration, 200)
+        XCTAssertEqual(
+            unchecked.toSyncedLine(),
+            SyncedLine(content: "x", translation: "t", start: 100, end: 300)
+        )
+    }
+
+    func testUncheckedSyncedLineToleratesReversedTimes() {
+        // 这正是它作为「过渡类型」的意义：中途允许 end < start，时长按原库口径落 0
+        let unchecked = UncheckedSyncedLine(content: "x", start: 300, end: 100)
+        XCTAssertEqual(unchecked.duration, 0)
+        XCTAssertEqual(unchecked.toSyncedLine().duration, 0)
     }
 
     func testSyncedLineDurationNormal() {

@@ -17,9 +17,8 @@
 //   3. 「前有主唱行就挂成伴奏」这一步不递归/不回溯：遇到伴奏行时若上一行也是伴奏行，
 //      就直接独立成行（原库的 `data.last()` 分支就是这样）。
 //
-// 关于 `isDigitsOnly()`：原库这个工具在 utils/TimeUtils.kt，只有本解析器使用，所以本移植
-// 不放进共享层，作为本文件的 private extension。Kotlin 的 `Char.isDigit()` 是 Unicode 语义
-// （阿拉伯-印度数字 ٠١٢ 也算数字），**不能**写成 `"0"..."9"` 的 ASCII 区间判断，详见该扩展的注释。
+// 关于 `isDigitsOnly()`：原库放在 utils/TimeUtils.kt（只有本解析器调用），移植后同样放在对应的
+// `LyricsTime` 里（`LyricsTime.isDigitsOnly`），不另开私有实现 —— 保持与原库的文件归属一致。
 
 import Foundation
 
@@ -99,7 +98,7 @@ public struct LyricifySyllableParser: LyricsParser {
             let durationText = String(matched.output.3)
             // 原库若"数字"不是纯数字字符就退化成 Error；`Int(...)` 负责真正的数值转换
             // （全角数字 `١` 虽能通过字符判断，但 Int 解析不出，同样退化成 0，与原库一致）。
-            if startText.isDigitsOnly, durationText.isDigitsOnly,
+            if LyricsTime.isDigitsOnly(startText), LyricsTime.isDigitsOnly(durationText),
                let start = Int(startText), let duration = Int(durationText) {
                 return KaraokeSyllable(content: String(matched.output.1), start: start, end: start + duration)
             }
@@ -124,23 +123,5 @@ public struct LyricifySyllableParser: LyricsParser {
                 start: startTime,
                 end: endTime
             ))
-    }
-}
-
-// MARK: - 字符集工具
-
-private extension String {
-
-    /// 是否全部由「数字字符」组成（原库 `utils/TimeUtils.kt` 的 `String.isDigitsOnly()`）。
-    ///
-    /// 原库实现是 Kotlin `all { it.isDigit() }`，那是 **Unicode 语义**：`Char.isDigit()` 等价于
-    /// Unicode 的 `Nd`（Decimal_Number）类别，阿拉伯-印度数字 `٣`、天城文 `३` 都算数字。
-    /// 所以这里必须用 `Character.isNumber`（本移植选的等价判断），**不能**写成
-    /// `"0"..."9"` 的 ASCII 区间：那会把 `(٣,100)` 判成非法而退化成 "Error"，与原库分叉。
-    /// 空串按原库口径返回 false（`all {}` 对空集合是 true，但原库调用前已保证捕获组非空；
-    /// 这里取 false 更贴合"没有数字字符"的直觉，且不会有调用点受影响）。
-    var isDigitsOnly: Bool {
-        if isEmpty { return false }
-        return allSatisfy { $0.isNumber }
     }
 }
