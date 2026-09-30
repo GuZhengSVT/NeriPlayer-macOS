@@ -27,6 +27,8 @@ struct NeriPlayerApp: App {
                     appState.startPlaybackStats()
                     // M3-T3：播放现场 —— 先恢复上次退出的队列/进度/模式，再开始录制新的变化。
                     appState.startPlaybackSession()
+                    // M3-T5：设置页（外观/播放行为/媒体库目录），并把启动音量下发给引擎。
+                    appState.startSettings()
                     // M2-T5：打开媒体库（失败时媒体库 tab 回落占位视图，不影响其他 tab）。
                     appState.startLibrary()
                 }

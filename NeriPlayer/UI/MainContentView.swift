@@ -84,13 +84,19 @@ struct MainContentView: View {
             PlaybackStatusBar(onActivate: { selectionBinding.wrappedValue = .library })
         }
         .frame(minWidth: 720, minHeight: 480)
+        // M3-T5：外观设置在整个窗口的根上生效，侧栏、状态条与各 tab 一起跟着变。
+        // 视图模型缺失（理论上不会发生，设置不依赖任何可失败资源）时保持系统默认外观。
+        .preferredColorScheme(appState.settingsViewModel?.appearance.colorScheme)
+        .tint(appState.settingsViewModel?.accent.color)
     }
 
-    /// 详情区。媒体库 tab 分派到真实视图，其余 tab 仍是占位。
+    /// 详情区。媒体库与设置分派到真实视图，其余 tab 仍是占位。
     @ViewBuilder
     private var detail: some View {
         if selection == .library, let viewModel = appState.libraryViewModel {
             LibraryView(viewModel: viewModel)
+        } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
+            SettingsView(viewModel: settingsViewModel)
         } else {
             PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
         }

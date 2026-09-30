@@ -160,8 +160,11 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
         save: @escaping SaveHandler,
         clear: @escaping ClearHandler,
         positionStep: Double = PlaybackSessionThreshold.positionStepSeconds,
-        isDurable: @escaping @Sendable (Track) -> Bool = PlaybackSessionPolicy.isDurable,
-        now: @escaping @Sendable () -> Date = Date.init
+        // 默认值写成显式的 @Sendable 闭包而不是直接引用方法与 Date.init：
+        // 后者是普通的非 Sendable 函数值，转换到 @Sendable 参数类型时会触发
+        // 「converting non-Sendable function value」告警。
+        isDurable: @escaping @Sendable (Track) -> Bool = { PlaybackSessionPolicy.isDurable($0) },
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.save = save
         self.clear = clear

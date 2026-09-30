@@ -127,6 +127,16 @@ public enum SettingsKeys {
     /// 默认 false：恢复到保存的进度但停在暂停态。一启动就出声对「打开应用看一眼」的场景
     /// 是打扰，而恢复队列与进度本身没有副作用，所以默认保留现场、不自动播。
     public static let resumePlaybackOnLaunch = SettingsKey<Bool>("resumePlaybackOnLaunch", default: false)
+    /// 强调色。取值见 AccentColorOption.rawValue，未识别时回落到 blue。
+    public static let accentColor = SettingsKey<String>("accentColor", default: "blue")
+    /// 启动音量（mpv 量程 0–100）。到播放集成启动时下发一次。
+    public static let defaultVolume = SettingsKey<Double>("defaultVolume", default: 70)
+    /// 已加入媒体库的音乐目录列表（JSON 编码的 [LibraryDirectory]）。
+    ///
+    /// 存 Data 而不是让设置层理解目录结构：SettingsStore 只负责「存取一个可编码值」，
+    /// 目录的字段演进（例如 M9 加书签字段）由 LibraryDirectoryStore 自己负责，
+    /// 不需要每加一个字段就改一次设置层。空 Data 表示「没有配置过」。
+    public static let libraryDirectories = SettingsKey<Data>("libraryDirectories", default: Data())
 }
 
 // MARK: - 变更事件
@@ -144,7 +154,11 @@ public struct SettingsChange: Equatable {
 // MARK: - 存储
 
 /// 设置存储层：UserDefaults 的类型安全封装 + 键粒度变更广播。
-public final class SettingsStore {
+///
+/// @unchecked Sendable：内部可变状态只有 continuations 字典，由 lock 串行化；
+/// UserDefaults 自身线程安全。播放侧（后台队列）与设置页（主线程）会同时读写它，
+/// 因此这个标注描述的是事实，而不只是为了消掉编译告警。
+public final class SettingsStore: @unchecked Sendable {
 
     /// App 全局共享实例，作用于 UserDefaults.standard。
     public static let shared = SettingsStore()

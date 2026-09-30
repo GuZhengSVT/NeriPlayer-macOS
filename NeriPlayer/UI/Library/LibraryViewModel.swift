@@ -262,6 +262,12 @@ final class LibraryViewModel: ObservableObject {
     private let favoriteRepository: FavoriteRepository
     private let syncService: LibrarySyncService
 
+    /// 扫描目录记忆（M3-T5）。由 AppState 注入；为 nil 时不记录（独立使用与测试场景）。
+    ///
+    /// 用可变属性而不是 init 参数：M2 的测试大量直接构造本类，为 M3-T5 的一个可选副作用
+    /// 去改所有调用点不划算；默认 nil 也让「不记录目录」成为显式的默认行为。
+    var directoryStore: LibraryDirectoryStore?
+
     /// 搜索防抖窗口：连续输入在 200ms 内只结算一次。
     private static let searchDebounceNanoseconds: UInt64 = 200_000_000
     /// 待结算的搜索任务；新输入到来时先取消上一次。
@@ -390,6 +396,9 @@ final class LibraryViewModel: ObservableObject {
     /// 扫描与落库是同步阻塞动作，放到 detached 任务执行；主线程只负责置状态与重新加载。
     func importDirectory(_ directory: URL) {
         guard !isSyncing else { return }
+        // M3-T5：把用户导入过的目录记下来（幂等），这样设置页里能看到并重新扫描它。
+        // 记录放在扫描之前：即使扫描失败，用户的选择也不该被丢掉。
+        directoryStore?.add(directory)
         isSyncing = true
         errorMessage = nil
         statusMessage = "正在扫描「\(directory.lastPathComponent)」…"

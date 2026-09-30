@@ -32,6 +32,11 @@ public final class AppState: ObservableObject {
     private var nowPlaying: NowPlayingController?
     /// 媒体库视图模型（M2-T5）。启动时打开数据库后创建；打开失败时为 nil。
     @Published private(set) var libraryViewModel: LibraryViewModel?
+    /// 设置页视图模型（M3-T5）。只依赖设置存储，启动时必定创建成功。
+    ///
+    /// 放在 AppState 而不是让设置页自建：根视图要用它来应用主题与强调色，
+    /// 两处必须是同一份状态，否则设置页改完主题、根视图不会重绘。
+    @Published private(set) var settingsViewModel: SettingsViewModel?
     /// 媒体库数据库连接（M2-T3）。与 libraryViewModel 同生命周期；本对象关闭即释放。
     private var libraryDatabase: DatabaseProvider?
     /// 统计写入管道（M3-T2）。订阅播放快照累积统计，退出时 flush；未启动为 nil。
@@ -211,5 +216,36 @@ public final class AppState: ObservableObject {
     private func shouldResumePlayback(for saved: PlayerState) -> Bool {
         guard saved.shouldResumePlayback else { return false }
         return settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
+    }
+
+    // MARK: - 设置（M3-T5）
+
+    /// 创建设置页视图模型。幂等。
+    ///
+    /// 重扫描动作注入的是本对象持有的媒体库视图模型：设置页因此不需要知道媒体库的存在，
+    /// 两者不会互相强引用。媒体库尚未就绪（开库失败）时注入的动作是空操作，
+    /// 此时目录仍可增删，只是不会立刻扫描。
+    @MainActor
+    public func startSettings() {
+        guard settingsViewModel == nil else { return }
+        settingsViewModel = SettingsViewModel(
+            settings: settings,
+            rescanHandler: { [weak self] url in
+                self?.libraryViewModel?.importDirectory(url)
+            }
+        )
+        applyDefaultVolume()
+    }
+
+    /// 把「启动音量」下发给播放引擎。幂等：可重复调用。
+    ///
+    /// 为什么在设置就绪之后单独下发而不是塞进播放集成启动流程：音量是用户偏好，
+    /// 与「引擎能否起来」无关；引擎缺失时这里只是空转，不必让调用方分两种情况。
+    @MainActor
+    public func applyDefaultVolume() {
+        guard let store = playbackStore else { return }
+        let volume = PlaybackBehaviorDefaults.clampedVolume(settings.value(for: SettingsKeys.defaultVolume))
+        store.setVolume(volume)
+        Log.player.info("已应用启动音量：\(Int(volume))")
     }
 }
