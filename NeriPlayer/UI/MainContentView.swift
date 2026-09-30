@@ -63,6 +63,7 @@ struct MainContentView: View {
     /// 设置存储（可注入，便于测试）。默认使用全局共享实例。
     private let store: SettingsStore
     @State private var selection: MainTab
+    @State private var lyricsPresented = false
 
     /// 构造时即读出上次选中的 tab，避免首帧先显示 home 再跳转。
     init(store: SettingsStore = .shared) {
@@ -81,9 +82,14 @@ struct MainContentView: View {
             }
             // 走 selectionBinding 而不是直接改 @State：点击状态条同样要把 tab 写进设置存储，
             // 否则重启后会回到上一次用侧栏选的 tab，而不是这条状态条带来的一次跳转。
-            PlaybackStatusBar(onActivate: { selectionBinding.wrappedValue = .library })
+            if let coordinator = appState.onlinePlayback { OnlinePlaybackStatusView(coordinator: coordinator) }
+            PlaybackStatusBar(onActivate: { selectionBinding.wrappedValue = .library },
+                              onLyrics: { lyricsPresented = true })
         }
         .frame(minWidth: 720, minHeight: 480)
+        .sheet(isPresented: $lyricsPresented) {
+            if let model = appState.lyricsViewModel { LyricsView(model: model) }
+        }
         // M3-T5：外观设置在整个窗口的根上生效，侧栏、状态条与各 tab 一起跟着变。
         // 视图模型缺失（理论上不会发生，设置不依赖任何可失败资源）时保持系统默认外观。
         .preferredColorScheme(appState.settingsViewModel?.appearance.colorScheme)
@@ -95,6 +101,10 @@ struct MainContentView: View {
     private var detail: some View {
         if selection == .library, let viewModel = appState.libraryViewModel {
             LibraryView(viewModel: viewModel)
+        } else if selection == .explore, let model = appState.onlineViewModel {
+            OnlineExploreView(viewModel: model, enqueueDownload: appState.downloadViewModel?.enqueue)
+        } else if selection == .downloads, let downloads = appState.downloadViewModel {
+            DownloadsView(viewModel: downloads)
         } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
             SettingsView(viewModel: settingsViewModel)
         } else {

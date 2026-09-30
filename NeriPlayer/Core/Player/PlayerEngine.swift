@@ -35,18 +35,25 @@ public struct PlayerEngineState: Equatable, Sendable {
     public var position: Double
     /// 当前文件总时长（秒）。未加载或已停止时为 0。
     public var duration: Double
-    /// 解码核心是否空闲。语义为「底层没有正在播放/加载的活动文件」，
-    /// libmpv 实现直接映射 core-idle；换后端时映射为「无活动播放会话」即可。
-    /// 之所以纳入协议：M1-T2 的 core-idle 是本任务要求桥接的属性之一，
-    /// 且上层需要区分「已停止」（idle）与「加载中/播放中」，仅凭 position 无法判断。
+    /// 解码核心是否空闲，包括暂停和缓冲；不能用它判断 EOF 或文件是否已加载。
     public var isCoreIdle: Bool
+    /// True only after a natural end-of-file, never for pause, buffering or failure.
+    public var hasEnded: Bool
+    /// The backend has opened the file and can accept seek commands.
+    public var hasLoadedFile: Bool
+    /// A backend file failure, distinct from natural EOF and pause/buffering.
+    public var playbackError: String?
 
-    public init(currentURL: URL?, isPaused: Bool, position: Double, duration: Double, isCoreIdle: Bool) {
+    public init(currentURL: URL?, isPaused: Bool, position: Double, duration: Double, isCoreIdle: Bool,
+                hasEnded: Bool = false, hasLoadedFile: Bool? = nil, playbackError: String? = nil) {
         self.currentURL = currentURL
         self.isPaused = isPaused
         self.position = position
         self.duration = duration
         self.isCoreIdle = isCoreIdle
+        self.hasEnded = hasEnded
+        self.hasLoadedFile = hasLoadedFile ?? (currentURL != nil && !isCoreIdle)
+        self.playbackError = playbackError
     }
 
     /// 未加载任何内容的初始状态。
@@ -91,7 +98,7 @@ extension PlayerEngineError: LocalizedError {
 ///
 /// 约定：
 ///   - 所有命令方法同步抛出；命令是「下发」语义，不代表文件已可用 ——
-///     `load(url:)` 返回时只保证命令已受理，加载完成需借助 `isCoreIdle` 观察；
+///     `load(url:)` 返回时只保证命令已受理，加载完成需借助 `hasLoadedFile` 观察；
 ///   - `currentURL` 在 `load(url:)` 成功后写入，`stop()` 后清空；
 ///   - 只读属性在任意线程可安全读取，返回最后一次已知的真值快照。
 public protocol PlayerEngine: AnyObject, Sendable {
@@ -106,9 +113,13 @@ public protocol PlayerEngine: AnyObject, Sendable {
     var duration: Double { get }
     /// 解码核心是否空闲（未加载/已停止/已播放到末尾）。
     var isCoreIdle: Bool { get }
+    var hasEnded: Bool { get }
+    var hasLoadedFile: Bool { get }
 
     /// 加载并替换当前文件（单文件播放，无队列）。
     func load(url: URL) throws
+    /// Restore without transient audio; backends should set pause before loading.
+    func load(url: URL, paused: Bool) throws
     /// 开始/继续播放。
     func play() throws
     /// 暂停播放。
@@ -143,6 +154,14 @@ public protocol PlayerEngine: AnyObject, Sendable {
 
 public extension PlayerEngine {
 
+    func load(url: URL, paused: Bool) throws {
+        try load(url: url)
+        if paused { try pause() }
+    }
+
+    var hasEnded: Bool { false }
+    var hasLoadedFile: Bool { currentURL != nil && !isCoreIdle }
+
     /// 由五个只读属性组合出的当前快照，便于上层一次性读取。
     var state: PlayerEngineState {
         PlayerEngineState(
@@ -150,7 +169,9 @@ public extension PlayerEngine {
             isPaused: isPaused,
             position: position,
             duration: duration,
-            isCoreIdle: isCoreIdle
+            isCoreIdle: isCoreIdle,
+            hasEnded: hasEnded,
+            hasLoadedFile: hasLoadedFile
         )
     }
 }

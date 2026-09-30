@@ -429,6 +429,33 @@ final class PlaybackStatsRecorderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(harness.timer.cancelCount, 1, "退出应取消定时器")
     }
 
+    func testStopFinalizesPlayAndDoesNotAccrueAfterStopping() throws {
+        let harness = try makeHarness()
+        let track = try insertTrack("StopOnce", duration: 200, into: harness.database)
+        harness.recorder.handle(snapshot(track, isPlaying: true, duration: 200))
+        harness.clock.advance(by: threshold)
+        harness.recorder.stop()
+        XCTAssertFalse(harness.recorder.isTrackingPlayback)
+        harness.clock.advance(by: 100)
+        harness.recorder.handle(snapshot(track, isPlaying: true, duration: 200))
+        harness.recorder.stop()
+        let written = try XCTUnwrap(stats(harness.database, track.id))
+        XCTAssertEqual(written.totalListenSeconds, threshold, accuracy: 0.001)
+        XCTAssertEqual(written.playCount, 1)
+    }
+
+    func testPeriodicFlushPersistsPlayCountWithoutPauseOrTrackChange() throws {
+        let harness = try makeHarness()
+        let track = try insertTrack("PeriodicCount", duration: 200, into: harness.database)
+        harness.recorder.handle(snapshot(track, isPlaying: true, duration: 200))
+        harness.clock.advance(by: threshold)
+        XCTAssertTrue(harness.recorder.flush(reason: .periodic))
+        XCTAssertEqual(try stats(harness.database, track.id)?.playCount, 1)
+        harness.clock.advance(by: threshold)
+        XCTAssertTrue(harness.recorder.flush(reason: .termination))
+        XCTAssertEqual(try stats(harness.database, track.id)?.playCount, 1)
+    }
+
     // MARK: - 7. 端到端（真实 PlaybackStateStore + 可控引擎）
 
     /// 订阅真实 store 的完整链路：入队即播 → 播放满阈值 → 切歌 → 统计落到库里。

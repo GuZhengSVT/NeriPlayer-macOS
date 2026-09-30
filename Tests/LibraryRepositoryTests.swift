@@ -60,6 +60,83 @@ final class LibraryRepositoryTests: XCTestCase {
         return record.id
     }
 
+    func testPlaybackUpsertAndReplacementPreserveLibraryMetadataAndReferences() throws {
+        let repository = LibraryRepository(provider)
+        let original = TrackRecord(
+            track: Track(url: URL(fileURLWithPath: "/m/full.mp3"), title: "Original"),
+            album: "Album", fileSize: 4096, format: "mp3",
+            fingerprintMtime: 1234, coverPath: "/covers/art.png",
+            createdAt: Date(timeIntervalSince1970: 1000)
+        )
+        try provider.dbQueue.write { db in try original.insert(db) }
+        let playlist = try PlaylistRepository(provider).create(name: "Keep references")
+        try PlaylistRepository(provider).addTrack(playlistId: playlist.id, trackId: original.id)
+        try FavoriteRepository(provider).favorite(trackId: original.id)
+        let url = try XCTUnwrap(URL(string: original.url))
+        let projected = Track(url: url, title: "Updated", artist: "Artist", duration: 120)
+
+        for replace in [false, true] {
+            if replace {
+                _ = try repository.replaceLibrary([projected])
+            } else {
+                _ = try repository.upsertTracks([projected])
+            }
+            let record = try provider.dbQueue.read { db in try XCTUnwrap(TrackRecord.fetchOne(db, key: original.id)) }
+            XCTAssertEqual(record.title, "Updated")
+            XCTAssertEqual(record.artist, "Artist")
+            XCTAssertEqual(record.durationSeconds, 120)
+            XCTAssertEqual(record.album, original.album)
+            XCTAssertEqual(record.fileSize, original.fileSize)
+            XCTAssertEqual(record.format, original.format)
+            XCTAssertEqual(record.fingerprintMtime, original.fingerprintMtime)
+            XCTAssertEqual(record.coverPath, original.coverPath)
+            XCTAssertEqual(record.createdAt, original.createdAt)
+            XCTAssertTrue(try FavoriteRepository(provider).isFavorited(trackId: original.id))
+            XCTAssertEqual(try PlaylistRepository(provider).entries(playlistId: playlist.id).map(\.id), [original.id])
+        }
+    }
+
+    func testMergePreservesCoverWhenOtherMetadataChangesWithoutNewCover() throws {
+        let repository = LibraryRepository(provider)
+        let first = LibraryTrack(id: UUID(), url: URL(fileURLWithPath: "/m/art.mp3"), title: "Before", coverPath: "/covers/art.png")
+        _ = try repository.mergeScanned([first], removingMissingUnder: nil)
+        let changed = LibraryTrack(id: UUID(), url: first.url, title: "After")
+        let result = try repository.mergeScanned([changed], removingMissingUnder: nil)
+        let saved = try XCTUnwrap(repository.allTracksSorted(by: .title).first)
+        XCTAssertEqual(result.updated, 1)
+        XCTAssertEqual(saved.id, first.id)
+        XCTAssertEqual(saved.title, "After")
+        XCTAssertEqual(saved.coverPath, first.coverPath)
+    }
+
+    func testMergeRepeatedURLUsesLatestContentWithoutViolatingUniqueConstraint() throws {
+        let repository = LibraryRepository(provider)
+        let first = LibraryTrack(id: UUID(), url: URL(fileURLWithPath: "/m/repeated.mp3"), title: "First")
+        let second = LibraryTrack(id: UUID(), url: first.url, title: "Second")
+        _ = try repository.mergeScanned([first, second, first], removingMissingUnder: nil)
+        let saved = try repository.allTracksSorted(by: .title)
+        XCTAssertEqual(saved.count, 1)
+        XCTAssertEqual(saved.first?.id, first.id)
+        XCTAssertEqual(saved.first?.title, "First")
+    }
+
+    func testLocalScanDoesNotDeleteRemoteTracksWithMatchingURLPath() throws {
+        let repository = LibraryRepository(provider)
+        let root = temporaryDirectories[0].appendingPathComponent("music", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let local = Track(url: root.appendingPathComponent("local.mp3"), title: "Local")
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "example.com"
+        components.path = root.appendingPathComponent("remote.mp3").path
+        let remote = Track(url: try XCTUnwrap(components.url), title: "Remote")
+        try repository.upsertTracks([local, remote])
+
+        let merge = try repository.mergeScanned([], removingMissingUnder: root)
+        XCTAssertEqual(merge.removedTrackIds, [local.id])
+        XCTAssertEqual(try repository.allTracks().map(\.id), [remote.id])
+    }
+
     // MARK: - 排序
 
     /// title 升/降序，中英混排按 localizedStandardCompare。

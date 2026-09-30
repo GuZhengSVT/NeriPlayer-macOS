@@ -183,10 +183,11 @@ public enum AudioMetadataReader {
     ///            标签损坏、未知容器不抛异常，退化为「文件名兜底 + fileSize」。
     public static func readMetadata(at url: URL) -> AudioMetadata? {
         let fileManager = FileManager.default
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              !isDirectory.boolValue else {
-            Log.db.debug("元数据读取跳过（文件不存在或为目录）：\(url.path, privacy: .public)")
+        guard url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isReadableKey]),
+              values.isRegularFile == true, values.isReadable == true,
+              fileManager.isReadableFile(atPath: url.path) else {
+            Log.db.debug("元数据读取跳过（不是可读的本地普通文件）：\(url.path, privacy: .public)")
             return nil
         }
 

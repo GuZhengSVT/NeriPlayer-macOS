@@ -60,8 +60,10 @@ MANUAL
 }
 
 # ---------- 1. 幂等检测 ----------
-existing_dylib="$(ls "$VENDOR_DIR"/lib/libmpv*.dylib 2>/dev/null | head -n 1 || true)"
-if [[ "$FORCE" -eq 0 && -n "$existing_dylib" && -f "$VENDOR_DIR/include/mpv/client.h" ]]; then
+existing_dylib="$VENDOR_DIR/lib/libmpv.dylib"
+existing_id="$(otool -D "$existing_dylib" 2>/dev/null | tail -n 1 || true)"
+if [[ "$FORCE" -eq 0 && -f "$existing_dylib" && -f "$VENDOR_DIR/include/mpv/client.h"
+      && "$existing_id" == @rpath/libmpv*.dylib ]] && codesign --verify "$existing_dylib" 2>/dev/null; then
   log "检测到已有产物，跳过（--force 可强制刷新）："
   log "  dylib : $existing_dylib"
   log "  header: $VENDOR_DIR/include/mpv/client.h"
@@ -119,7 +121,14 @@ log "brew 版本: mpv $mpv_version"
 log "架构     : $(uname -m)"
 
 # ---------- 3. 布置产物 ----------
+# Reject redirected trees before replacing any artifacts.
+for target in "$ROOT_DIR/Vendor" "$VENDOR_DIR" "$VENDOR_DIR/include" "$VENDOR_DIR/lib"; do
+  if [[ -L "$target" ]]; then err "拒绝修改符号链接目录：$target"; exit 1; fi
+done
 mkdir -p "$VENDOR_DIR/include" "$VENDOR_DIR/lib"
+resolved_vendor="$(cd "$VENDOR_DIR" && pwd -P)"
+expected_vendor="$(cd "$ROOT_DIR" && pwd -P)/Vendor/mpv"
+[[ "$resolved_vendor" == "$expected_vendor" ]] || { err "Vendor 路径不在项目内"; exit 1; }
 
 rm -rf "$VENDOR_DIR/include/mpv"
 cp -R "$src_include" "$VENDOR_DIR/include/"
@@ -128,29 +137,21 @@ log "已布置头文件 -> Vendor/mpv/include/mpv（$(ls "$VENDOR_DIR/include/mp
 rm -f "$VENDOR_DIR/lib/libmpv"*.dylib
 cp -R "${src_dylibs[@]}" "$VENDOR_DIR/lib/"
 
-# 只为真实文件改写 install_name 并重签名（软链交给同一目录内的目标文件）
-dylib_real="$VENDOR_DIR/lib/$(ls "$VENDOR_DIR/lib" | grep -E '^libmpv.[0-9]+(.[0-9]+)*.dylib$' | head -n 1 || true)"
+# Fail closed: copied but unrelocated/unsigned libraries are not usable artifacts.
 dylib_id=""
-if [[ -n "$dylib_real" ]]; then
-  base="$(basename "$dylib_real")"
-  dylib_id="@rpath/$base"
-  if command -v install_name_tool >/dev/null 2>&1; then
-    install_name_tool -id "$dylib_id" "$dylib_real" 2>/dev/null || true
-  fi
-  # 修正同目录内（以及 dev 软链）指向 keg 的 install_name
-  for f in "$VENDOR_DIR"/lib/libmpv*.dylib; do
-    [[ -L "$f" ]] && continue
-    cur_id="$(otool -D "$f" 2>/dev/null | tail -n 1 || true)"
-    [[ -n "$cur_id" && "$cur_id" == "$mpv_prefix"* ]] && install_name_tool -id "@rpath/$(basename "$f")" "$f" 2>/dev/null || true
-  done
-  # Apple Silicon 下改动 Mach-O 后必须重新签名
-  if command -v codesign >/dev/null 2>&1; then
-    for f in "$VENDOR_DIR"/lib/libmpv*.dylib; do
-      [[ -L "$f" ]] && continue
-      codesign --force --sign - "$f" >/dev/null 2>&1 || log "警告：重签名失败（${f}），若加载报签名错误请手动 codesign。"
-    done
-  fi
+for f in "$VENDOR_DIR"/lib/libmpv*.dylib; do
+  [[ -L "$f" ]] && continue
+  [[ -f "$f" ]] || continue
+  base="$(basename "$f")"
+  install_name_tool -id "@rpath/$base" "$f"
+  codesign --force --sign - "$f"
+  codesign --verify "$f"
+done
+if [[ ! -f "$VENDOR_DIR/lib/libmpv.dylib" ]]; then
+  err "缺少 libmpv.dylib 链接入口"; exit 1
 fi
+dylib_id="$(otool -D "$VENDOR_DIR/lib/libmpv.dylib" | tail -n 1)"
+[[ "$dylib_id" == @rpath/libmpv*.dylib ]] || { err "install_name 校验失败"; exit 1; }
 
 log "已布置动态库 -> Vendor/mpv/lib（$(ls "$VENDOR_DIR"/lib/libmpv*.dylib | wc -l | tr -d ' ') 个条目）"
 

@@ -69,6 +69,18 @@ public struct LibrarySyncResult: Equatable, Sendable {
     }
 }
 
+/// An incomplete snapshot must never authorize destructive library reconciliation.
+public enum LibrarySyncError: Error, LocalizedError, Equatable {
+    case incompleteScan(URL)
+
+    public var errorDescription: String? {
+        switch self {
+        case .incompleteScan(let directory):
+            return "无法完整读取目录「\(directory.path)」，媒体库保持不变。请检查目录及访问权限后重试。"
+        }
+    }
+}
+
 // MARK: - 同步服务
 
 /// 扫描 -> 落库。一个有状态的薄封装：持有 scanner（增量缓存跨轮保留）与仓库。
@@ -138,6 +150,7 @@ public struct LibrarySyncService: Sendable {
     @discardableResult
     public func sync(directory: URL) throws -> LibrarySyncResult {
         let scan = scanner.scan(directory: directory)
+        guard scan.isComplete else { throw LibrarySyncError.incompleteScan(scan.directory) }
         let existingByURL = try repository.existingTracksByURL()
 
         var prepared: [LibraryTrack] = []

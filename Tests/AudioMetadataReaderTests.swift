@@ -120,6 +120,24 @@ final class AudioMetadataReaderTests: XCTestCase {
         XCTAssertNil(metadata.album)
     }
 
+    func testUnreadableFileIsNotFilenameOnlyMetadata() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("unreadable-\(UUID()).mp3")
+        try FileManager.default.copyItem(at: fixtureURL("tagged", extension: "mp3"), to: url)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try? FileManager.default.removeItem(at: url)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path)
+        guard !FileManager.default.isReadableFile(atPath: url.path) else {
+            throw XCTSkip("This user can read permission-denied files")
+        }
+        XCTAssertNil(AudioMetadataReader.readMetadata(at: url))
+    }
+
+    func testRemoteURLCannotReadLocalFileWithSamePath() {
+        XCTAssertNil(AudioMetadataReader.readMetadata(at: URL(string: "https://example.com/etc/hosts")!))
+    }
+
     // MARK: - 异常路径
 
     /// 不存在的文件：返回 nil，不抛异常、不崩溃。

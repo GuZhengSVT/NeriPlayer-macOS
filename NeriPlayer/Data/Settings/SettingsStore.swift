@@ -137,6 +137,13 @@ public enum SettingsKeys {
     /// 目录的字段演进（例如 M9 加书签字段）由 LibraryDirectoryStore 自己负责，
     /// 不需要每加一个字段就改一次设置层。空 Data 表示「没有配置过」。
     public static let libraryDirectories = SettingsKey<Data>("libraryDirectories", default: Data())
+    /// M4: lyric presentation and per-file association/timing preferences.
+    public static let lyricsFontSize = SettingsKey<Double>("lyricsFontSize", default: 28)
+    public static let lyricsBlur = SettingsKey<Bool>("lyricsBlur", default: false)
+    public static let lyricsTranslation = SettingsKey<Bool>("lyricsTranslation", default: true)
+    public static let lyricsPhonetic = SettingsKey<Bool>("lyricsPhonetic", default: true)
+    public static let lyricsAssociations = SettingsKey<Data>("lyricsAssociations", default: Data())
+    public static let lyricsOffsets = SettingsKey<Data>("lyricsOffsets", default: Data())
 }
 
 // MARK: - 变更事件

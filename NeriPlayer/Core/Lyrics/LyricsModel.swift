@@ -66,7 +66,7 @@ public struct SyncedLine: LyricsTimedLine {
     ///
     /// 原库注释：乱序/异常时间戳会让 end < start，此处把时长钳到非负，避免单行构造失败导致
     /// 整份歌词解析不出来。
-    public var duration: Int { max(end - start, 0) }
+    public var duration: Int { LyricsTime.duration(start: start, end: end) }
 
     public init(content: String, translation: String? = nil, start: Int, end: Int) {
         self.content = content
@@ -96,7 +96,7 @@ public struct UncheckedSyncedLine: LyricsTimedLine {
     public var end: Int
 
     /// 时长，毫秒，钳到非负（原库 `takeIf { it >= 0 } ?: 0`，与 `SyncedLine` 同口径）。
-    public var duration: Int { max(end - start, 0) }
+    public var duration: Int { LyricsTime.duration(start: start, end: end) }
 
     public init(content: String, translation: String? = nil, start: Int, end: Int) {
         self.content = content
@@ -299,10 +299,7 @@ extension LyricsLine: LyricsTimedLine {
     public func progress(current: Int) -> Float {
         switch self {
         case .synced(let line):
-            if current < line.start { return 0 }
-            if current > line.end { return 1 }
-            guard line.duration > 0 else { return 1 }
-            return Float(current - line.start) / Float(line.duration)
+            return LyricsTime.progress(current: current, start: line.start, end: line.end)
         case .main(let line): return line.progress(current: current)
         case .accompaniment(let line): return line.progress(current: current)
         }

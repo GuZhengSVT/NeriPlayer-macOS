@@ -1,4 +1,6 @@
 // MPVController.swift
+// The native event and property bridge is intentionally kept together.
+// swiftlint:disable file_length
 // NeriPlayer macOS —— libmpv C API 的 Swift 封装（移植规划 M1-T2）。
 //
 // 职责边界（本任务只做这些）：
@@ -9,14 +11,8 @@
 //   - 错误统一为 MPVError，日志走 Log.player。
 // 不做：播放队列、音源解析、音频输出设备选择、渲染（属 M1-T3 及之后）。
 //
-// 两层结构（为什么不是一个类）：
-//   MPVController        对外类型化门面（play / seek / observe 等）；拥有 MPVEventLoop。
-//   MPVEventLoop         句柄 + 事件循环的实际所有者；循环任务强引用它。
-//   若把 mpv_wait_event 循环直接写在 MPVController 上，循环就会一直强引用控制器，
-//   而 deinit 需要引用计数归零 —— 循环自身就是那个永远不释放的引用，于是控制器
-//   永不析构、循环永不退出，释放时直接死锁（这是实测踩到的坑）。
-//   拆出 MPVEventLoop 后：循环强引用引擎、控制器强引用引擎，引擎不反向引用控制器，
-//   所以控制器可以正常析构，并在 deinit 里显式关闭引擎。
+// 控制器拥有事件循环；循环只持有自身，避免控制器永不析构。
+// 析构请求停止，事件循环退出后释放句柄；回调线程上不自同步。
 //
 // 线程模型（依据 mpv/client.h 的 Multithreading 一节）：
 //   「The client API is generally fully thread-safe, unless otherwise noted.」
@@ -26,8 +22,7 @@
 //   边界很重要：不能把这些调用也 sync 到事件队列 —— 事件循环长期占用该队列，
 //   sync 会永久排队，必然死锁。
 //
-// 事件循环线程不执行任何用户代码：属性变更只做 continuation.yield（线程安全、非阻塞、
-//   缓冲满时丢最旧值），消费者在自己的执行上下文 await 取值。
+// 事件循环同时支持异步流和同步回调；同步回调不得阻塞事件线程。
 
 import CMpv
 import Foundation
@@ -159,6 +154,13 @@ public enum MPVSeekMode: String, Sendable {
     case absolutePercent = "absolute-percent"
 }
 
+/// File lifecycle events retain libmpv's playlist entry identity across replacements.
+public enum MPVFileEvent: Sendable {
+    case loaded(entryID: Int64)
+    case ended(entryID: Int64, reachedEOF: Bool)
+    case failed(entryID: Int64, errorCode: Int32)
+}
+
 // MARK: - 事件循环引擎
 
 /// libmpv 句柄与事件循环的所有者。MPVController 的私有实现细节。
@@ -172,6 +174,9 @@ final class MPVEventLoop: @unchecked Sendable {
 
     private let handle: OpaquePointer
     private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Bool>()
+    private var activeEntryID: Int64 = -1
+    private var fileHandlers: [UUID: @Sendable (MPVFileEvent) -> Void] = [:]
 
     /// 保护下列可变状态：事件循环线程与调用者线程会短暂交汇。
     private let lock = NSLock()
@@ -197,6 +202,7 @@ final class MPVEventLoop: @unchecked Sendable {
     init(handle: OpaquePointer) {
         self.handle = handle
         queue = DispatchQueue(label: MPVController.eventQueueLabel)
+        queue.setSpecific(key: queueKey, value: true)
     }
 
     // MARK: 事件循环
@@ -223,6 +229,7 @@ final class MPVEventLoop: @unchecked Sendable {
             }
             dispatch(event: event)
         }
+        destroyHandle()
         Log.player.debug("mpv 事件循环结束")
     }
 
@@ -230,17 +237,19 @@ final class MPVEventLoop: @unchecked Sendable {
     private func dispatch(event: mpv_event) {
         switch event.event_id {
         case MPV_EVENT_PROPERTY_CHANGE, MPV_EVENT_GET_PROPERTY_REPLY:
+            dispatchProperty(event)
+        case MPV_EVENT_START_FILE:
             guard let raw = event.data else { return }
-            let change = Self.makeChange(
-                property: raw.assumingMemoryBound(to: mpv_event_property.self).pointee
-            )
-            // 先取出订阅（短暂持锁），再在锁外投递，
-            // 避免消费者侧 onTermination 回调与事件线程争同一把锁。
-            guard let subscription = observer(for: event.reply_userdata) else { break }
-            subscription.continuation?.yield(change)
-            // 同步 handler 在事件线程上直接调用：这条路径不经过调度，属性一变就落地。
-            for entry in subscription.handlers {
-                entry.handler(change)
+            activeEntryID = raw.assumingMemoryBound(to: mpv_event_start_file.self).pointee.playlist_entry_id
+        case MPV_EVENT_FILE_LOADED:
+            broadcastFileEvent(.loaded(entryID: activeEntryID))
+        case MPV_EVENT_END_FILE:
+            guard let raw = event.data else { return }
+            let end = raw.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+            if end.reason == MPV_END_FILE_REASON_ERROR {
+                broadcastFileEvent(.failed(entryID: end.playlist_entry_id, errorCode: end.error))
+            } else {
+                broadcastFileEvent(.ended(entryID: end.playlist_entry_id, reachedEOF: end.reason == MPV_END_FILE_REASON_EOF))
             }
         case MPV_EVENT_LOG_MESSAGE:
             log(event: event)
@@ -248,6 +257,21 @@ final class MPVEventLoop: @unchecked Sendable {
             // 其余事件（SEEK / PLAYBACK_RESTART / FILE_LOADED 等）M1-T2 不消费，
             // 需要时在 M1-T3 通过新增订阅接口暴露。
             break
+        }
+    }
+
+    private func dispatchProperty(_ event: mpv_event) {
+        guard let raw = event.data else { return }
+        let change = Self.makeChange(
+            property: raw.assumingMemoryBound(to: mpv_event_property.self).pointee
+        )
+        // 先取出订阅（短暂持锁），再在锁外投递，
+        // 避免消费者侧 onTermination 回调与事件线程争同一把锁。
+        guard let subscription = observer(for: event.reply_userdata) else { return }
+        subscription.continuation?.yield(change)
+        // 同步 handler 在事件线程上直接调用：这条路径不经过调度，属性一变就落地。
+        for entry in subscription.handlers {
+            entry.handler(change)
         }
     }
 
@@ -265,24 +289,45 @@ final class MPVEventLoop: @unchecked Sendable {
         // 1) 置停止标志并唤醒可能正在等待的 mpv_wait_event。
         lock.lock()
         stopRequested = true
+        if !tornDown { mpv_wakeup(handle) }
         lock.unlock()
-        mpv_wakeup(handle)
 
-        // 2) 用队列自身的 FIFO 顺序作屏障，等事件循环跑完并退出。
-        //    若 start() 的 block 还没被调度，本屏障先执行，随后它运行时看到的
-        //    stopRequested 已是 true，会立即退出，不会再有 mpv_wait_event 在跑。
-        queue.sync { }
+        // A final strong reference may be released inside an event callback.
+        // Never sync to our own queue; runLoop owns cleanup after callbacks unwind.
+        if DispatchQueue.getSpecific(key: queueKey) == nil {
+            queue.sync { }
+        }
+    }
 
-        // 3) 结束所有订阅流（消费者看到流正常结束）。此刻句柄仍有效，
-        //    因此 onTermination 触发的 unobserve 是安全的。
-        finishAllObservers()
-
-        // 4) 标记已销毁后再释放句柄，杜绝后续误用（例如迟到的一次 unobserve）。
+    private func destroyHandle() {
         lock.lock()
+        guard !tornDown else { lock.unlock(); return }
         tornDown = true
+        fileHandlers.removeAll()
         lock.unlock()
+        finishAllObservers()
         mpv_terminate_destroy(handle)
         Log.player.info("MPVController 已销毁")
+    }
+
+    func addFileObserver(_ handler: @escaping @Sendable (MPVFileEvent) -> Void) -> any MPVPropertyObservation {
+        let id = UUID()
+        lock.lock()
+        if !tornDown { fileHandlers[id] = handler }
+        lock.unlock()
+        return MPVPropertyToken { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            self.fileHandlers.removeValue(forKey: id)
+            self.lock.unlock()
+        }
+    }
+
+    private func broadcastFileEvent(_ event: MPVFileEvent) {
+        lock.lock()
+        let handlers = Array(fileHandlers.values)
+        lock.unlock()
+        for handler in handlers { handler(event) }
     }
 
     // MARK: 状态访问
@@ -391,6 +436,28 @@ final class MPVEventLoop: @unchecked Sendable {
             }
         }
         try Self.check(status, function: "mpv_set_property_string(\(name))")
+    }
+
+    func setStringList(_ name: String, _ values: [String]) throws {
+        let handle = try liveHandle()
+        let strings = values.map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        var nodes = strings.map { string -> mpv_node in
+            var node = mpv_node()
+            node.format = MPV_FORMAT_STRING
+            node.u.string = string
+            return node
+        }
+        let status = nodes.withUnsafeMutableBufferPointer { buffer -> Int32 in
+            var list = mpv_node_list(num: Int32(buffer.count), values: buffer.baseAddress, keys: nil)
+            return withUnsafeMutablePointer(to: &list) { pointer in
+                var root = mpv_node()
+                root.format = MPV_FORMAT_NODE_ARRAY
+                root.u.list = pointer
+                return name.withCString { mpv_set_property(handle, $0, MPV_FORMAT_NODE, &root) }
+            }
+        }
+        try Self.check(status, function: "mpv_set_property(\(name), STRING_LIST)")
     }
 
     func setFlag(_ name: String, _ value: Bool) throws {
@@ -565,39 +632,6 @@ final class MPVEventLoop: @unchecked Sendable {
     }
 }
 
-// MARK: - 启动选项
-
-/// 一条 mpv 启动选项（等价于命令行的 `--name=value`）。
-///
-/// 与运行期属性的区别：启动选项只在 `mpv_initialize` 之前有效，用来决定内核**以什么形态**
-/// 起来（音频输出、解码器、配置来源等）；初始化之后同名项属于运行期属性，语义与可写性都不同。
-public struct MPVLaunchOption: Equatable, Sendable {
-
-    /// 选项名（不含前导 `--`）。
-    public let name: String
-    /// 选项值；会被 mpv 按该选项自身的语法解析。
-    public let value: String
-
-    public init(name: String, value: String) {
-        self.name = name
-        self.value = value
-    }
-
-    /// 把音频输出接到 null 设备：音频照常解码、照常推进时钟，只是最后的输出环节把采样丢弃。
-    ///
-    /// 用途是测试：本仓库的播放素材是系统提示音（/System/Library/Sounds/*.aiff），
-    /// 真机跑测试会持续出声。刻意不用 `audio=no` —— 那会整个关掉音频轨，文件在 mpv 眼里
-    /// 变成「没有音轨」，测到的就不是真实的解码与时钟，而是一个被削掉一半的播放链路。
-    /// `ao=null` 保留完整链路，只换掉输出设备。
-    ///
-    /// 为什么不是默认全局静音：音频输出设备枚举（M1-T7 的 AudioDeviceManager）测的正是
-    /// 「当前 AO 下有哪些设备」，全局换成 null 会让那份设备列表退化成只有 null 一项。
-    /// 因此由需要出声的测试夹具显式传入，而不是塞进所有实例的默认值。
-    public static let silentAudio: [MPVLaunchOption] = [
-        MPVLaunchOption(name: "ao", value: "null")
-    ]
-}
-
 // MARK: - 对外门面
 
 /// libmpv 实例的 Swift 封装：一个实例对应一个 mpv_handle。
@@ -745,6 +779,11 @@ public final class MPVController: @unchecked Sendable {
         try engine.setString(name, value)
     }
 
+    /// Writes an mpv string-list property through the node API.
+    public func setStringList(_ name: String, _ values: [String]) throws {
+        try engine.setStringList(name, values)
+    }
+
     /// 写入布尔（flag）属性。
     public func setFlag(_ name: String, _ value: Bool) throws {
         try engine.setFlag(name, value)
@@ -753,6 +792,11 @@ public final class MPVController: @unchecked Sendable {
     /// 写入浮点属性。
     public func setDouble(_ name: String, _ value: Double) throws {
         try engine.setDouble(name, value)
+    }
+
+    /// Explicit file lifecycle, distinct from pause/buffering property changes.
+    public func addFileObserver(_ handler: @escaping @Sendable (MPVFileEvent) -> Void) -> any MPVPropertyObservation {
+        engine.addFileObserver(handler)
     }
 
     // MARK: 属性订阅

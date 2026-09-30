@@ -435,6 +435,8 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
     var position: Double { snapshot.position }
     var duration: Double { snapshot.duration }
     var isCoreIdle: Bool { snapshot.isCoreIdle }
+    var hasLoadedFile: Bool { snapshot.hasLoadedFile }
+    var hasEnded: Bool { snapshot.hasEnded }
 
     /// 已受理的加载次数。
     var loadCount: Int { locked { loadCountValue } }
@@ -458,6 +460,8 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
             state.duration = 60
             state.isPaused = false
             state.isCoreIdle = false
+            state.hasEnded = false
+            state.hasLoadedFile = true
         }
     }
 
@@ -516,6 +520,8 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
         mutate { state in
             state.position = 0
             state.isCoreIdle = true
+            state.hasEnded = true
+            state.hasLoadedFile = false
         }
     }
 

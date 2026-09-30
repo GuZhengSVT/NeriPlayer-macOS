@@ -26,15 +26,25 @@
 import Foundation
 
 /// 单文件播放引擎的 libmpv 实现。
-public final class MPVEngine: PlayerEngine, @unchecked Sendable {
+public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecked Sendable {
 
     /// 保护 stateValue 与 continuations：属性事件线程与调用者线程会交汇。
     private let lock = NSLock()
+    private let lifecycleLock = NSRecursiveLock()
+    private var currentEntryID: Int64?
+    private var fileObservation: (any MPVPropertyObservation)?
     private var stateValue: PlayerEngineState = .idle
     private var continuations: [UUID: AsyncStream<PlayerEngineState>.Continuation] = [:]
 
     /// M1-T2 的 libmpv 封装；本类只通过其公开 API 访问内核。
     private let controller: MPVController
+    private var audioTransport: OnlineAudioTransport?
+    private var playbackCache: PlaybackAudioCache?
+
+    func setPlaybackCache(_ cache: PlaybackAudioCache?) {
+        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
+        playbackCache = cache
+    }
     /// 四条属性的同步订阅令牌，deinit 时取消。
     private var propertyObservations: [any MPVPropertyObservation] = []
     /// 同步状态观察者（M3 收尾修复）：状态一变就在事件线程上直接通知订阅者，
@@ -51,6 +61,8 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     }
 
     deinit {
+        audioTransport?.stop()
+        fileObservation?.cancel()
         // 先停同步订阅，再结束对外流，避免状态在销毁过程中继续广播。
         for observation in propertyObservations {
             observation.cancel()
@@ -72,13 +84,49 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     public var position: Double { snapshot.position }
     public var duration: Double { snapshot.duration }
     public var isCoreIdle: Bool { snapshot.isCoreIdle }
+    public var hasEnded: Bool { snapshot.hasEnded }
+    public var hasLoadedFile: Bool { snapshot.hasLoadedFile }
+    public var state: PlayerEngineState { snapshot }
 
     // MARK: - 命令
 
     public func load(url: URL) throws {
-        guard url.isFileURL else {
-            throw PlayerEngineError.unsupportedURL(url)
+        try load(url: url, paused: false)
+    }
+
+    public func load(url: URL, paused: Bool) throws {
+        guard url.isFileURL else { throw PlayerEngineError.unsupportedURL(url) }
+        try loadMedia(url: url, headers: [:], paused: paused)
+    }
+
+    public func loadResolvedAudio(_ audio: ResolvedAudio, paused: Bool) throws {
+        guard let scheme = audio.url.scheme?.lowercased(), ["https", "http"].contains(scheme),
+              audio.url.host != nil, audio.url.user == nil, audio.url.password == nil else {
+            throw PlayerEngineError.unsupportedURL(audio.url)
         }
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        if audio.song.source == .youtubeMusic {
+            audioTransport?.stop()
+            let transport = try OnlineAudioTransport(cache: playbackCache)
+            audioTransport = transport
+            let local = try transport.register(audio)
+            try loadMedia(url: audio.url, headers: [:], paused: paused, transportURL: local)
+        } else {
+            try loadMedia(url: audio.url, headers: audio.headers, paused: paused)
+        }
+    }
+
+    private func loadMedia(url: URL, headers: [String: String], paused: Bool, transportURL: URL? = nil) throws {
+        var fields = try OnlinePlaybackHeaders.validated(headers)
+        let userAgentKey = fields.keys.first { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }
+        let userAgent = userAgentKey.flatMap { fields.removeValue(forKey: $0) } ?? "NeriPlayer/0.1"
+        let refererKey = fields.keys.first { $0.caseInsensitiveCompare("Referer") == .orderedSame }
+        let referer = refererKey.flatMap { fields.removeValue(forKey: $0) } ?? ""
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        if transportURL == nil { audioTransport?.stop(); audioTransport = nil }
+        currentEntryID = nil
         // 先复位为新文件状态，再下发命令。顺序很关键：duration 只在文件打开后推一次，
         // 若先下命令再复位，事件线程可能在复位前把新 duration 送进来、随后被复位成 0，
         // 于是 duration 会一直停在 0。先前解新内容在时序上不会覆盖后到的新值。
@@ -86,20 +134,30 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
             state.currentURL = url
             state.position = 0
             state.duration = 0
-            state.isPaused = false
+            state.isPaused = paused
+            state.isCoreIdle = true
+            state.hasEnded = false
+            state.hasLoadedFile = false
+            state.playbackError = nil
         }
         do {
             try perform {
-                try controller.loadFile(url.path)
-                // 显式清 pause：内核的 pause 不随 loadfile 复位（实测）。
-                try controller.play()
+                // Pause before loading so a restored paused session never emits audio.
+                try controller.setStringList("http-header-fields", fields.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" })
+                try controller.setString("user-agent", userAgent)
+                try controller.setString("referrer", referer)
+                try controller.setString("ytdl", "no")
+                try controller.setString("http-proxy", url.isFileURL || transportURL != nil ? "" : (OnlineProxySettings.systemProxy(for: url) ?? ""))
+                try controller.setFlag("pause", paused)
+                try controller.loadFile(transportURL?.absoluteString ?? (url.isFileURL ? url.path : url.absoluteString))
+                currentEntryID = try controller.getInt64("playlist/0/id")
             }
         } catch {
             // 命令未受理时不留下「已加载」的假状态。
             mutate { $0 = .idle }
             throw error
         }
-        Log.player.info("MPVEngine 加载：\(url.lastPathComponent)")
+        Log.player.info("MPVEngine 加载：在线=\(!url.isFileURL)，host=\(url.host ?? "local", privacy: .public)")
     }
 
     public func play() throws {
@@ -113,6 +171,10 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     }
 
     public func stop() throws {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        currentEntryID = nil
+        audioTransport?.stop(); audioTransport = nil
         try perform {
             try controller.stop()
             // 同 load：paused 状态下 stop 后内核 pause 仍为 true，需显式复位。
@@ -163,6 +225,9 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     /// 连带把内存态、界面文案与现场落库一起拖住。同步订阅在 mpv 事件线程上直接回调，
     /// 折叠时序与原先完全一致（仍按事件到达顺序逐条 apply），变的是「谁来驱动」。
     private func startObserving() {
+        fileObservation = controller.addFileObserver { [weak self] event in
+            self?.applyFileEvent(event)
+        }
         let properties: [MPVProperty] = [.timePosition, .duration, .paused, .coreIdle]
         for property in properties {
             let observation = controller.addPropertyObserver(property) { [weak self] change in
@@ -172,8 +237,35 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
         }
     }
 
+    private func applyFileEvent(_ event: MPVFileEvent) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        switch event {
+        case .loaded(let entryID):
+            guard entryID == currentEntryID else { return }
+            mutate { $0.hasLoadedFile = true; $0.playbackError = nil }
+        case .ended(let entryID, let reachedEOF):
+            guard entryID == currentEntryID else { return }
+            mutate {
+                $0.hasLoadedFile = false
+                $0.hasEnded = reachedEOF
+                $0.isCoreIdle = true
+            }
+        case .failed(let entryID, let errorCode):
+            guard entryID == currentEntryID else { return }
+            mutate {
+                $0.hasLoadedFile = false
+                $0.hasEnded = false
+                $0.isCoreIdle = true
+                $0.playbackError = "音频加载或播放失败（mpv \(errorCode)）"
+            }
+        }
+    }
+
     /// 把一次属性变更折叠进状态。只在事件线程调用。
     private func apply(_ change: MPVPropertyChange) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
         switch change.property {
         case MPVProperty.timePosition.rawValue:
             mutate { $0.position = change.doubleValue ?? 0 }

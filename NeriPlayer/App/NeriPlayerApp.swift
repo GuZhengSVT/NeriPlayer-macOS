@@ -23,14 +23,16 @@ struct NeriPlayerApp: App {
                     // 顺序有讲究：先按崩溃记录决定是否降级，再启动播放集成。
                     appState.detectSafeMode()
                     appState.startPlaybackIntegration()
-                    // M3-T2：统计写入管道（依赖上一步创建的 playbackStore；安全模式下自行跳过）。
-                    appState.startPlaybackStats()
-                    // M3-T3：播放现场 —— 先恢复上次退出的队列/进度/模式，再开始录制新的变化。
-                    appState.startPlaybackSession()
-                    // M3-T5：设置页（外观/播放行为/媒体库目录），并把启动音量下发给引擎。
-                    appState.startSettings()
-                    // M2-T5：打开媒体库（失败时媒体库 tab 回落占位视图，不影响其他 tab）。
+                    // 媒体库先就绪，设置页的扫描回调才有实际接收者。
                     appState.startLibrary()
+                    // 在恢复现场（可能自动播放）之前应用启动音量，避免先以默认音量出声。
+                    appState.startSettings()
+                    appState.startPlaybackStats()
+                    // 先恢复，再订阅现场变化，避免空快照覆盖保存的队列。
+                    appState.startOnlineSources()
+                    appState.startDownloads()
+                    appState.startPlaybackSession()
+                    appState.startLyrics()
                 }
         }
     }

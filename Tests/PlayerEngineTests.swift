@@ -177,6 +177,35 @@ final class PlayerEngineTests: XCTestCase {
         XCTAssertFalse(reloaded.isCoreIdle)
     }
 
+    func testPausedLoadIsReadyWithoutStartingPlayback() async throws {
+        let engine = try makeEngine()
+        try engine.load(url: Self.longSound, paused: true)
+        let loaded = try await waitForState(engine) { $0.hasLoadedFile && $0.isPaused }
+        XCTAssertFalse(loaded.hasEnded)
+        try engine.seek(to: 1.0)
+        _ = try await waitForState(engine) { $0.position > 0.9 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(engine.isPaused)
+        XCTAssertFalse(engine.hasEnded)
+        XCTAssertEqual(engine.position, 1.0, accuracy: 0.1)
+    }
+
+    func testOnlyNaturalEndSetsEndedFlag() async throws {
+        let engine = try makeEngine()
+        try engine.load(url: Self.shortSound)
+        let remote = try XCTUnwrap(URL(string: "https://example.com/rejected.mp3"))
+        XCTAssertThrowsError(try engine.load(url: remote))
+        let ended = try await waitForState(engine) { $0.hasEnded }
+        XCTAssertFalse(ended.hasLoadedFile)
+        try engine.load(url: Self.longSound, paused: true)
+        _ = try await waitForState(engine) { $0.hasLoadedFile && $0.isPaused }
+        XCTAssertFalse(engine.hasEnded)
+        try engine.stop()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(engine.hasEnded)
+        XCTAssertFalse(engine.hasLoadedFile)
+    }
+
     // MARK: - 音量
 
     /// 音量命令在加载前后都应被受理（内核量程 0–100）。

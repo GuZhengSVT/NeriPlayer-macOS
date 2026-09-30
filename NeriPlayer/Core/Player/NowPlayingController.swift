@@ -90,14 +90,14 @@ public extension NowPlayingCommands {
             play: {
                 let snapshot = store.snapshot
                 guard snapshot.currentTrack != nil else { return false }
-                if snapshot.isPaused || snapshot.isCoreIdle {
+                if snapshot.isPaused || !store.hasLoadedFile {
                     store.togglePlayPause()
                 }
                 return true
             },
             pause: {
                 let snapshot = store.snapshot
-                guard snapshot.currentTrack != nil, !snapshot.isPaused, !snapshot.isCoreIdle else {
+                guard snapshot.currentTrack != nil, !snapshot.isPaused, store.hasLoadedFile else {
                     return false
                 }
                 store.togglePlayPause()
@@ -120,7 +120,7 @@ public extension NowPlayingCommands {
             },
             seekPosition: { position in
                 let snapshot = store.snapshot
-                guard snapshot.currentTrack != nil, !snapshot.isCoreIdle else { return false }
+                guard snapshot.currentTrack != nil, store.hasLoadedFile, position.isFinite else { return false }
                 let lowerBounded = max(position, 0)
                 let target = snapshot.duration > 0 ? min(lowerBounded, snapshot.duration) : lowerBounded
                 store.seek(to: target)
@@ -278,8 +278,8 @@ public struct NowPlayingInfo: Equatable, Sendable {
 
     /// 系统播放状态（macOS 必须显式设置）。
     public var playbackState: MPNowPlayingPlaybackState {
-        if isCoreIdle { return .stopped }
-        return isPaused ? .paused : .playing
+        if isPaused { return .paused }
+        return isCoreIdle ? .stopped : .playing
     }
 
     /// 回填给 MPNowPlayingInfoCenter 的字典：任务要求的五个键，歌手缺失时不写入空串。

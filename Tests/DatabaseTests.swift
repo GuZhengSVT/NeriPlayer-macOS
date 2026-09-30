@@ -211,9 +211,9 @@ final class DatabaseTests: XCTestCase {
         let provider = try makeProvider()
         let repository = PlaylistRepository(provider)
         let playlist = try repository.create(name: "p")
-        let ids = ["a", "b", "c"].map { title -> UUID in
+        let ids = try ["a", "b", "c"].map { title -> UUID in
             let track = makeTrack(title)
-            try? LibraryRepository(provider).upsertTracks([track])
+            _ = try LibraryRepository(provider).upsertTracks([track])
             return track.id
         }
         for id in ids {

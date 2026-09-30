@@ -124,6 +124,9 @@ public struct LibraryScanResult: Equatable, Sendable {
     public var skippedCount: Int
     /// 从缓存中剔除的「本轮已不存在」文件数。
     public var removedCount: Int
+    /// Only complete scans are authoritative for deleting missing library entries.
+    /// An unavailable root, enumeration failure, or unreadable audio file makes this false.
+    public var isComplete: Bool
 
     public init(
         directory: URL,
@@ -132,7 +135,8 @@ public struct LibraryScanResult: Equatable, Sendable {
         ignoredFileCount: Int,
         scannedCount: Int,
         skippedCount: Int,
-        removedCount: Int
+        removedCount: Int,
+        isComplete: Bool = true
     ) {
         self.directory = directory
         self.tracks = tracks
@@ -141,6 +145,7 @@ public struct LibraryScanResult: Equatable, Sendable {
         self.scannedCount = scannedCount
         self.skippedCount = skippedCount
         self.removedCount = removedCount
+        self.isComplete = isComplete
     }
 }
 
@@ -228,7 +233,7 @@ public final class LibraryScanner: @unchecked Sendable {
             publish(LibraryScanProgress(phase: .finished, discovered: 0, processed: 0, total: 0))
             return LibraryScanResult(
                 directory: root, tracks: [], discoveredCount: 0, ignoredFileCount: 0,
-                scannedCount: 0, skippedCount: 0, removedCount: 0
+                scannedCount: 0, skippedCount: 0, removedCount: 0, isComplete: false
             )
         }
 
@@ -244,6 +249,7 @@ public final class LibraryScanner: @unchecked Sendable {
         // 第二遍：逐个文件比对指纹，未变复用、变化重读。
         var tracks: [Track] = []
         tracks.reserveCapacity(total)
+        var isComplete = discovery.isComplete
         var scannedCount = 0
         var skippedCount = 0
         var seenPaths: Set<String> = []
@@ -268,8 +274,8 @@ public final class LibraryScanner: @unchecked Sendable {
                 tracks.append(track)
                 scannedCount += 1
             } else {
-                // 文件在枚举与读取之间消失（或不可读）：剔除缓存，不产出 Track。
-                removeCacheEntry(for: path)
+                // Keep cached identity: a read failure is not evidence of deletion.
+                isComplete = false
                 Log.db.debug("媒体库扫描跳过不可读文件：\(path, privacy: .public)")
             }
 
@@ -277,7 +283,7 @@ public final class LibraryScanner: @unchecked Sendable {
         }
 
         // 剪枝：被扫描子树内本轮未再出现的路径，从缓存移除（删除/改名）。
-        let removedCount = pruneCache(under: root, keeping: seenPaths)
+        let removedCount = isComplete ? pruneCache(under: root, keeping: seenPaths) : 0
 
         publish(LibraryScanProgress(phase: .finished, discovered: total, processed: total, total: total))
         let summary = "媒体库扫描完成：\(root.path) 入库 \(tracks.count) 首，"
@@ -291,11 +297,18 @@ public final class LibraryScanner: @unchecked Sendable {
             ignoredFileCount: discovery.ignoredCount,
             scannedCount: scannedCount,
             skippedCount: skippedCount,
-            removedCount: removedCount
+            removedCount: removedCount,
+            isComplete: isComplete
         )
     }
 
     // MARK: 目录枚举
+
+    private struct DiscoveryResult {
+        var files: [DiscoveredFile]
+        var ignoredCount: Int
+        var isComplete: Bool
+    }
 
     /// 深度优先枚举 root 下的音频文件。
     ///
@@ -305,13 +318,14 @@ public final class LibraryScanner: @unchecked Sendable {
     private func discoverAudioFiles(
         in root: URL,
         fileManager: FileManager
-    ) -> (files: [DiscoveredFile], ignoredCount: Int) {
+    ) -> DiscoveryResult {
         let keys: Set<URLResourceKey> = [
             .isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey,
             .fileSizeKey, .contentModificationDateKey
         ]
         var files: [DiscoveredFile] = []
         var ignoredCount = 0
+        var isComplete = true
         var stack: [URL] = [root]
 
         while let directory = stack.popLast() {
@@ -325,12 +339,16 @@ public final class LibraryScanner: @unchecked Sendable {
             } catch {
                 let failure = "媒体库扫描跳过无法读取的目录：\(directory.path) \(error)"
                 Log.db.error("\(failure, privacy: .public)")
+                isComplete = false
                 continue
             }
 
             var subdirectories: [URL] = []
             for entry in entries.sorted(by: { $0.path < $1.path }) {
-                guard let values = try? entry.resourceValues(forKeys: keys) else { continue }
+                guard let values = try? entry.resourceValues(forKeys: keys) else {
+                    isComplete = false
+                    continue
+                }
 
                 // 符号链接优先判定：isDirectory 会反映链接目标，先看 isSymbolicLink 才能挡住
                 // 「指向目录的链接」被当成真目录继续下探。
@@ -364,7 +382,7 @@ public final class LibraryScanner: @unchecked Sendable {
             }
         }
 
-        return (files, ignoredCount)
+        return DiscoveryResult(files: files, ignoredCount: ignoredCount, isComplete: isComplete)
     }
 
     // MARK: 缓存访问（全部在锁内）

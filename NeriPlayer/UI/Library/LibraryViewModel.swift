@@ -367,13 +367,13 @@ final class LibraryViewModel: ObservableObject {
     /// 搜索态下优先查滤镜后的聚合，否则从「某歌手（已过滤）」点进去会看到该歌手全部曲目。
     func tracks(for group: ArtistGroup) -> [LibraryTrack] {
         let source = isSearching ? searchArtistGroups : artistGroups
-        return source.first { $0.id == group.id }?.tracks ?? group.tracks
+        return source.first { $0.id == group.id }?.tracks ?? []
     }
 
     /// 详情页回读：按专辑组 id 取最新曲目。
     func tracks(for group: AlbumGroup) -> [LibraryTrack] {
         let source = isSearching ? searchAlbumGroups : albumGroups
-        return source.first { $0.id == group.id }?.tracks ?? group.tracks
+        return source.first { $0.id == group.id }?.tracks ?? []
     }
 
     // MARK: 目录导入
@@ -514,7 +514,7 @@ final class LibraryViewModel: ObservableObject {
     /// 重读当前打开歌单的曲目。歌单被删或未打开时清空详情态。
     private func reloadOpenPlaylist() {
         guard let openPlaylistId, playlists.contains(where: { $0.id == openPlaylistId }) else {
-            playlistEntries = []
+            closePlaylist()
             return
         }
         do {

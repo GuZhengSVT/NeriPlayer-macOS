@@ -129,7 +129,7 @@ public struct KugouKrcParser: LyricsParser {
 
             // 时间轴不允许回退：起点不前进就把它推到上一行 +3ms。原库用 -1 当"还没有上一行"。
             if lastLineStartTime != -1, lineStart <= lastLineStartTime {
-                lineStart = lastLineStartTime + 3
+                lineStart = LyricsTime.adding(lastLineStartTime, 3)
             }
             lastLineStartTime = lineStart
 
@@ -268,8 +268,8 @@ public struct KugouKrcParser: LyricsParser {
 
             // 只看「下一个」是不是冒号：合并后冒号跟着前一个字，高亮时不会单独闪一下
             if let next, next.text == "：" || next.text == ":" {
-                let start = baseStartTime + current.offset
-                let end = start + current.duration + next.duration
+                let start = LyricsTime.adding(baseStartTime, current.offset)
+                let end = LyricsTime.adding(LyricsTime.adding(start, current.duration), next.duration)
                 mergedSyllables.append(KaraokeSyllable(
                     content: current.text + next.text,
                     start: start,
@@ -277,8 +277,8 @@ public struct KugouKrcParser: LyricsParser {
                 ))
                 index += 2
             } else {
-                let start = baseStartTime + current.offset
-                let end = start + current.duration
+                let start = LyricsTime.adding(baseStartTime, current.offset)
+                let end = LyricsTime.adding(start, current.duration)
                 mergedSyllables.append(KaraokeSyllable(
                     content: current.text,
                     start: start,

@@ -69,6 +69,7 @@ final class PlayerEngineObservationTests: XCTestCase {
         let broadcaster = PlayerEngineStateBroadcaster()
         let received = SyncBox(0)
         var token: (any PlayerEngineStateObservation)? = broadcaster.add { _ in received.value += 1 }
+        XCTAssertNotNil(token)
         XCTAssertEqual(broadcaster.observerCount, 1)
 
         token = nil

@@ -7,6 +7,8 @@
 - 关联任务：M1-T8（本记录）、M8-T4（音效系统，落实本决策）、M8-T6（USB 独占）、M8-T3（流体背景 / 未来音频 beat 响应）
 - 参考实现：Android 侧 `core/player/effects/PlaybackEffectsController.kt`、`core/player/effects/AudioReactive.kt`、`core/player/model/PlaybackSoundModels.kt`、`PlayerManager`（fade / crossfade 部分）
 
+> 审查补充（2026-09-30）：以下探针为历史记录，本轮没有重新进行音效/硬件验证。顺次淡出再淡入不是重叠 crossfade，不应以“交叉淡入淡出已支持”宣传。自定义 IOProc、直接 libusb 和 mpv 自带 AO 是不同架构；IOProc 本身不构成独占保证。M8-T6 必须另行验证路由、设备占用、采样率与退出恢复，不能从此 ADR 推出已兼容。
+
 > 本文是 M8-T4 的实现基线。M8-T4 开工前若有异议，应先修改本文件再动代码，而不是在实现里另起一套。
 
 ---

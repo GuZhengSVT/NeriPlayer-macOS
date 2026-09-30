@@ -88,14 +88,11 @@ public struct TTMLParser: LyricsParser {
     /// 把 AMLL 等工具不严格合规的 TTML 掰回规范形状（原库 `preformattingTTML`，注释写着
     /// "Workaround for AMLL and other tools not strictly following the spec"）。
     ///
-    /// 三步的顺序有依赖，别调换：
-    ///   1. 去掉所有双空格 —— 这一步顺带把缩进删了（缩进是 2 的倍数），于是 `<span>` 之间的
-    ///      换行+缩进会塌成裸换行，下一步的模式才可能出现；
-    ///   2. 原来的 `</span><span` 中间没空格，两个 span 会挤成一个音节，补一个空格；
-    ///   3. 同上，但处理 `,</span><span`（英文逗号后直接跟下一个词，AMLL 常见）。
+    /// Preserve interior spaces in lyric/translation text. Only relocate an existing
+    /// trailing word space and retain the upstream comma-spacing workaround.
     private func preformattingTTML(_ content: String) -> String {
         content
-            .replacingOccurrences(of: "  ", with: "")
+
             .replacingOccurrences(of: " </span><span", with: "</span> <span")
             .replacingOccurrences(of: ",</span><span", with: ",</span> <span")
     }
@@ -130,12 +127,12 @@ public struct TTMLParser: LyricsParser {
 
         // 2. 行级注音（整行一个 `<span ttm:role="x-roman">`）。
         let linePhonetic = p.children.first { $0.name == "span" && $0.hasRole("x-roman") }?
-            .text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .text.trimmingCharacters(in: .whitespacesAndNewlines).decodedLyricXML
 
         // 3. 行内译文。带 x-bg 的译文属于和声轨，不算主轨译文。
         let inlineTranslation = p.children.first {
             $0.name == "span" && $0.hasRole("x-translation") && !$0.hasRole("x-bg")
-        }?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }?.text.trimmingCharacters(in: .whitespacesAndNewlines).decodedLyricXML
 
         let itunesTranslation = lookupTranslation(itunesKey, in: translations).map(splitTranslationByBracket)
 
@@ -191,7 +188,7 @@ public struct TTMLParser: LyricsParser {
         let bgKey = bgSpan.attribute("itunes:key", "key") ?? parentKey
 
         let inlineTranslation = bgSpan.children.first { $0.hasRole("x-translation") }?
-            .text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .text.trimmingCharacters(in: .whitespacesAndNewlines).decodedLyricXML
 
         // 原库的 elvis 链：优先行内译文 span，其次 iTunes 译文表；
         // iTunes 译文走括号拆分，并**优先取括号内**（和声歌词常把和声词放在括号里）。
@@ -242,7 +239,8 @@ public struct TTMLParser: LyricsParser {
             // 只认 span；译文/和声 span 在这一层不是音节。
             guard child.name == "span" else { continue }
             let isMetadataSpan = child.attributes.contains {
-                $0.name.hasSuffix(":role") && ($0.value == "x-translation" || $0.value == "x-bg")
+                ($0.name == "role" || $0.name.hasSuffix(":role"))
+                    && ["x-translation", "x-bg", "x-roman"].contains($0.value)
             }
             guard !isMetadataSpan else { continue }
 
@@ -254,7 +252,7 @@ public struct TTMLParser: LyricsParser {
 
             // 只往后看一格：原库不会跨过别的节点去找空格，跨过就等于把间距算到了错误的词上。
             let nextSibling = index + 1 < children.count ? children[index + 1] : nil
-            if let nextSibling, nextSibling.name == "#text" {
+            if let nextSibling, nextSibling.name == "#text", nextSibling.text.allSatisfy({ $0.isWhitespace }) {
                 syllableContent += SimpleXmlParser.decodeEntities(nextSibling.text)
             }
 
@@ -289,7 +287,7 @@ public struct TTMLParser: LyricsParser {
                     guard let key = textElement.attributes.first(where: { $0.name == "for" })?.value else { continue }
                     // 空白文本不算译文（`<text>` 里只有缩进是常态）。
                     if !Self.isBlank(textElement.text) {
-                        translations[key] = textElement.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        translations[key] = textElement.text.trimmingCharacters(in: .whitespacesAndNewlines).decodedLyricXML
                     }
                 }
             }
@@ -406,7 +404,7 @@ public struct TTMLParser: LyricsParser {
     /// 只用于「一行没有任何音节」的降级路径，所以这里不必保留 `#text` 的空白语义 ——
     /// 那些空白节点会走进递归，但它们的 `text` 原样拼上后再由调用方 trim，正合原库意图。
     private func extractAllText(_ element: XmlElement) -> String {
-        var text = element.text
+        var text = element.children.contains { $0.name == "#text" } ? "" : element.text
         for child in element.children {
             if child.name == "span"
                 && (child.hasRole("x-translation") || child.hasRole("x-bg") || child.hasRole("x-roman")) {
@@ -527,4 +525,8 @@ public struct TTMLParser: LyricsParser {
         guard let firstNonWhitespace = line.firstIndex(where: { !$0.isWhitespace }) else { return line.count }
         return line.distance(from: line.startIndex, to: firstNonWhitespace)
     }
+}
+
+private extension String {
+    var decodedLyricXML: String { SimpleXmlParser.decodeEntities(self) }
 }

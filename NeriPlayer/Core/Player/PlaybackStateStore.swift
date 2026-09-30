@@ -20,10 +20,8 @@
 //     queue.currentTrack 交给 engine.load(url:)；
 //   - 自然播完（EOF）后按队列模式自动推进：重复调 queue.next() 即可覆盖三种情形 ——
 //     repeatOne 返回当前曲（→ 重播）、repeatAll/shuffle 返回下一首、sequential 在末尾返回 nil（→ 停在末尾）；
-//   - EOF 与「用户主动 stop」必须区分：核心是 playbackArmed 闩锁。只有观察到引擎真正离开空闲态之后，
-//     才把随后回到空闲态解释为 EOF；load / stop 都会先清闩锁，于是「加载过程中的空闲」与
-//     「用户 stop 产生的空闲」都不会被误判成 EOF。另有一道 currentURL 与队列当前曲的一致性校验，
-//     防止「用户切歌」与「上一首 EOF」并发时推进两次。
+//   - 自动推进只消费显式 hasEnded；core-idle 包含暂停/缓冲，不能代表 EOF。
+//     文件加载成功才武装一次推进，并校验引擎 URL 与队列当前曲的一致性。
 //
 // 线程模型：沿用本层做法 —— NSLock 串行化内部状态，yield 一律在锁外；引擎与队列各自线程安全，
 // 本类只读取它们最后一次已知的快照。命令方法由调用线程同步发起并立即更新队列，不等事件回流。
@@ -54,6 +52,8 @@ public struct PlaybackSnapshot: Equatable, Sendable {
     public var isCoreIdle: Bool
     /// 队列完整快照（内容 + 当前索引 + 模式 + 随机序列）。
     public var queue: QueueState
+    /// Runtime failure is separate from natural EOF; online orchestration may recover it.
+    public var playbackError: String?
 
     public init(
         currentTrack: Track?,
@@ -61,7 +61,8 @@ public struct PlaybackSnapshot: Equatable, Sendable {
         position: Double,
         duration: Double,
         isCoreIdle: Bool,
-        queue: QueueState
+        queue: QueueState,
+        playbackError: String? = nil
     ) {
         self.currentTrack = currentTrack
         self.isPaused = isPaused
@@ -69,6 +70,7 @@ public struct PlaybackSnapshot: Equatable, Sendable {
         self.duration = duration
         self.isCoreIdle = isCoreIdle
         self.queue = queue
+        self.playbackError = playbackError
     }
 }
 
@@ -82,16 +84,26 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 保护 stateValue / continuations / 桥接闩锁。
     private let lock = NSLock()
+    private let loadLock = NSRecursiveLock()
+    /// Initial replay and later yields must remain ordered across producer threads.
+    private let publicationLock = NSRecursiveLock()
+    private var onlineLoadHandler: (@Sendable (Track, UUID, Bool) -> Void)?
+    private var onlineFailureHandler: (@Sendable (Track, UUID, String) -> Void)?
+    private var onlineRequestID: UUID?
+    private var activeMediaURL: URL?
     private var stateValue: PlaybackSnapshot
     private var continuations: [UUID: AsyncStream<PlaybackSnapshot>.Continuation] = [:]
 
     /// 播放引擎（M1-T3）。协议类型：便于换后端与测试注入。
     private let engine: any PlayerEngine
+
+    func setPlaybackCache(_ cache: PlaybackAudioCache?) {
+        (engine as? MPVEngine)?.setPlaybackCache(cache)
+    }
     /// 播放队列（M1-T4）。
     private let queue: QueueManager
 
-    /// 引擎是否已在本轮加载后真正开始播放（离开空闲态）。EOF 判定依赖它：
-    /// 只有「先离开空闲」再「回到空闲」才算自然播完，避免把加载中的空闲当作 EOF。
+    /// 已加载文件，允许消费一次显式 EOF；load / stop 清除此标记。
     private var playbackArmed = false
     /// 是否应保持「引擎与队列当前曲一致」。stop() 置 false，任何播放命令置 true。
     private var shouldPlayCurrent = false
@@ -113,6 +125,7 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 一次待应用的现场恢复：引擎真正加载起来之后才 seek / 决定播放态。
     private struct PendingRestore {
+        var trackID: UUID
         /// 目标进度（秒）。
         var position: Double
         /// 恢复完成后是否立刻开始播放。
@@ -130,6 +143,7 @@ public final class PlaybackStateStore: @unchecked Sendable {
         self.queue = queue
         let initialEngineState = engine.state
         engineState = initialEngineState
+        activeMediaURL = initialEngineState.currentURL
         stateValue = PlaybackSnapshot(
             currentTrack: queue.currentTrack,
             isPaused: initialEngineState.isPaused,
@@ -179,6 +193,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     public var position: Double { snapshot.position }
     /// 当前文件总时长（秒）。
     public var duration: Double { snapshot.duration }
+    /// Readiness is independent of core-idle (which also includes pause/buffering).
+    public var hasLoadedFile: Bool { engine.hasLoadedFile }
     /// 队列快照。
     public var queueState: QueueState { snapshot.queue }
 
@@ -187,6 +203,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     /// 订阅内存态变更。每次订阅返回独立新流：先推一次当前快照，之后只在快照真正变化时产出。
     public func observeState() -> AsyncStream<PlaybackSnapshot> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            publicationLock.lock()
+            defer { publicationLock.unlock() }
             let id = UUID()
             lock.lock()
             let current = stateValue
@@ -199,10 +217,74 @@ public final class PlaybackStateStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - Online resolution binding
+
+    public func setOnlineHandlers(load: (@Sendable (Track, UUID, Bool) -> Void)?,
+                                  failure: (@Sendable (Track, UUID, String) -> Void)?) {
+        lock.lock()
+        onlineLoadHandler = load
+        onlineFailureHandler = failure
+        lock.unlock()
+    }
+
+    public func isCurrentOnlineRequest(_ id: UUID, trackID: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return onlineRequestID == id && queue.currentTrack?.id == trackID
+    }
+
+    @discardableResult
+    func loadCachedAudio(_ url: URL, for track: Track, requestID: UUID, paused: Bool) throws -> Bool {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        guard isCurrentOnlineRequest(requestID, trackID: track.id) else { return false }
+        lock.lock()
+        activeMediaURL = url
+        playbackArmed = false
+        lock.unlock()
+        try engine.load(url: url, paused: paused)
+        publish()
+        return true
+    }
+
+    @discardableResult
+    public func loadResolvedAudio(_ audio: ResolvedAudio, for track: Track, requestID: UUID, paused: Bool,
+                                  resumePosition: Double? = nil) throws -> Bool {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        guard isCurrentOnlineRequest(requestID, trackID: track.id) else { return false }
+        guard let engine = engine as? any ResolvedAudioPlayerEngine else {
+            throw OnlineError.unsupported("当前播放引擎不支持在线音源")
+        }
+        lock.lock()
+        activeMediaURL = audio.url
+        playbackArmed = false
+        if let position = resumePosition, position.isFinite, position > 0 {
+            pendingRestore = PendingRestore(trackID: track.id, position: position, shouldPlay: !paused)
+        }
+        lock.unlock()
+        try engine.loadResolvedAudio(audio, paused: paused)
+        publish()
+        return true
+    }
+
+    /// Advance at most through each queue entry after failure, even in repeat-one mode.
+    public func skipFailedOnlineTrack(_ trackID: UUID) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        guard queue.currentTrack?.id == trackID else { return }
+        let state = queue.state
+        guard let index = state.currentIndex, index + 1 < state.tracks.count else { stop(); return }
+        queue.jump(to: index + 1)
+        loadCurrent()
+    }
+
     // MARK: - 命令：播放当前曲 / 暂停
 
     /// 立刻播放指定曲目。若它已在队列中（按 id 匹配）则跳转到该曲；否则追加到队尾再跳转。
     public func playTrack(_ track: Track) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         selectInQueue(track)
         lock.lock()
         shouldPlayCurrent = true
@@ -212,7 +294,7 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 在播放/暂停之间切换。若引擎当前空闲（未加载、已停止或自然播完），则从头播放队列当前曲。
     public func togglePlayPause() {
-        if engine.isCoreIdle || engine.currentURL == nil {
+        if !engine.hasLoadedFile || engine.currentURL == nil {
             guard queue.currentTrack != nil else {
                 publish()
                 return
@@ -245,6 +327,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     /// 下一首。顺序模式下已在末位且 force 为 false 时不动作；force 为 true 则回卷到首曲。
     /// - Parameter force: 是否强制推进（到末尾时回卷），对齐 Android 版 next(force) 语义。
     public func next(force: Bool = false) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         var target = queue.next()
         if target == nil, force {
             target = queue.jump(to: 0)
@@ -261,6 +345,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 上一首。顺序模式下已在首曲时不动作；列表循环回卷到末曲。
     public func previous() {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         guard queue.previous() != nil else {
             publish()
             return
@@ -275,10 +361,16 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 整批替换队列并从 startIndex 开始播放（索引越界自动钳位）。空列表则停止播放。
     public func setQueue(_ tracks: [Track], startIndex: Int = 0) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         queue.setQueue(tracks, startAt: startIndex)
         if tracks.isEmpty {
             lock.lock()
+            onlineRequestID = nil
+            activeMediaURL = nil
             shouldPlayCurrent = false
+            playbackArmed = false
+            pendingRestore = nil
             lock.unlock()
             stopEngine()
             publish()
@@ -329,8 +421,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     /// 恢复退出时的现场：整体采纳队列、加载当前曲，并把引擎移到保存的进度。
     ///
     /// 进度为什么不在这里直接 seek：libmpv 的 loadfile 是「下发即返回」，此刻文件还没打开，
-    /// 紧接着的 seek 会被内核拒绝（M1-T3 实测）。因此把目标进度挂起，等引擎真正离开空闲态
-    /// （handleEngineState 收到 isCoreIdle == false）再应用一次 —— 事件驱动，不引入定时等待，
+    /// 紧接着的 seek 会被内核拒绝（M1-T3 实测）。因此把目标进度挂起，等引擎确认文件已加载
+    /// （handleEngineState 收到 hasLoadedFile == true）再应用一次 —— 事件驱动，不引入定时等待，
     /// 也不会因为机器慢而在「文件还没打开」时白白丢掉一次 seek。
     ///
     /// 恢复后的播放态：`resumePlayback` 为 false 时停在保存的进度上暂停（默认，避免一启动就出声），
@@ -340,9 +432,11 @@ public final class PlaybackStateStore: @unchecked Sendable {
     ///   - state: 保存的现场。
     ///   - resumePlayback: 恢复完成后是否自动继续播放。
     public func restore(_ state: PlayerState, resumePlayback: Bool = false) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         queue.restore(state.queueState)
-        guard state.currentTrack != nil else {
-            publish()
+        guard let track = state.currentTrack else {
+            stop()
             return
         }
         lock.lock()
@@ -350,9 +444,9 @@ public final class PlaybackStateStore: @unchecked Sendable {
         // 否则恢复出来的暂停现场一旦收到 EOF 就会自己往下切歌。
         shouldPlayCurrent = false
         playbackArmed = false
-        pendingRestore = PendingRestore(position: max(0, state.position), shouldPlay: resumePlayback)
+        pendingRestore = PendingRestore(trackID: track.id, position: max(0, state.position), shouldPlay: resumePlayback)
         lock.unlock()
-        loadCurrent()
+        load(queue.currentTrack, preservingRestore: true)
     }
 
     /// 当前现场（供 M3-T3 落库）。位置取最近一次折叠出的引擎进度，
@@ -371,10 +465,14 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 停止播放并卸载当前文件。队列内容保留，且不会因此自动推进下一首。
     public func stop() {
+        loadLock.lock()
+        defer { loadLock.unlock() }
         lock.lock()
         shouldPlayCurrent = false
         playbackArmed = false
         pendingRestore = nil
+        onlineRequestID = nil
+        activeMediaURL = nil
         lock.unlock()
         stopEngine()
         publish()
@@ -425,23 +523,23 @@ public final class PlaybackStateStore: @unchecked Sendable {
     private func handleEngineState(_ state: PlayerEngineState) {
         var advanceTo: Track?
         var restore: PendingRestore?
+        var failure: (track: Track, detail: (token: UUID, message: String))?
         lock.lock()
         engineState = state
-        if state.isCoreIdle {
-            if playbackArmed {
+        let stillCurrent = state.currentURL == (activeMediaURL ?? queue.currentTrack?.url)
+        if let message = state.playbackError, stillCurrent,
+           let track = queue.currentTrack, track.onlineSong != nil, let token = onlineRequestID {
+            failure = (track, (token, message))
+        }
+        let failureHandler = onlineFailureHandler
+        if state.hasEnded {
+            if playbackArmed, shouldPlayCurrent, stillCurrent {
                 playbackArmed = false
-                // 一致性校验：只有「引擎里的文件」仍是队列当前曲时，才把这次空闲当作 EOF。
-                // 用户刚切过歌（队列已指向新曲）而上一首的 EOF 迟到时，这条校验会挡掉误推进。
-                let stillCurrent = state.currentURL == queue.currentTrack?.url
-                if shouldPlayCurrent, stillCurrent {
-                    advanceTo = advanceAfterEndLocked()
-                }
+                advanceTo = advanceAfterEndLocked()
             }
-        } else {
-            // 真正离开空闲态，说明本轮加载成功并开始播放，可以武装 EOF 判定。
+        } else if state.hasLoadedFile, stillCurrent {
             playbackArmed = true
-            // 文件就绪，现在 seek 才会被内核接受（见 restore 的说明）。只应用一次。
-            if let pending = pendingRestore {
+            if let pending = pendingRestore, pending.trackID == queue.currentTrack?.id {
                 pendingRestore = nil
                 restore = pending
             }
@@ -449,11 +547,13 @@ public final class PlaybackStateStore: @unchecked Sendable {
         lock.unlock()
 
         publish()
+        if let failure { failureHandler?(failure.track, failure.detail.token, failure.detail.message) }
         if let restore {
             applyRestore(restore)
         }
         if let advanceTo {
-            load(advanceTo)
+            // Never wait for the command lock from mpv's lifecycle callback thread.
+            Task { [weak self] in self?.loadAfterEnd(advanceTo) }
         }
     }
 
@@ -462,6 +562,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     /// 顺序不能颠倒：loadfile 会把 pause 清掉（M1-T3），先 play 再 seek 会让「恢复到暂停态」
     /// 在暂停生效前响一小段。
     private func applyRestore(_ pending: PendingRestore) {
+        guard pending.trackID == queue.currentTrack?.id,
+              engine.currentURL == (activeMediaURL ?? queue.currentTrack?.url) else { return }
         do {
             if pending.position > 0 {
                 try engine.seek(to: pending.position)
@@ -494,23 +596,47 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     // MARK: - 内部：加载与发布
 
+    private func loadAfterEnd(_ track: Track) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        lock.lock()
+        let allowed = shouldPlayCurrent && queue.currentTrack?.id == track.id
+        lock.unlock()
+        if allowed { load(track) }
+    }
+
     /// 把队列当前曲加载进引擎。
     private func loadCurrent() {
         load(queue.currentTrack)
     }
 
     /// 加载指定曲目（nil 则什么都不做）。加载前清 EOF 闩锁，避免加载过程中的空闲被误判成 EOF。
-    private func load(_ track: Track?) {
+    private func load(_ track: Track?, preservingRestore: Bool = false) {
         guard let track else {
             publish()
             return
         }
+        loadLock.lock()
+        defer { loadLock.unlock() }
         lock.lock()
         playbackArmed = false
+        activeMediaURL = nil
+        onlineRequestID = nil
+        if !preservingRestore { pendingRestore = nil }
+        let initiallyPaused = pendingRestore.map { !$0.shouldPlay } ?? false
+        let handler = onlineLoadHandler
+        let token = UUID()
+        if track.onlineSong != nil { onlineRequestID = token }
         lock.unlock()
+        if track.onlineSong != nil {
+            stopEngine()
+            if let handler { handler(track, token, initiallyPaused) } else { Log.player.error("在线音源解析器未就绪") }
+            publish()
+            return
+        }
         do {
-            try engine.load(url: track.url)
-            Log.player.info("PlaybackStateStore 加载：\(track.url.lastPathComponent)")
+            try engine.load(url: track.url, paused: initiallyPaused)
+            Log.player.info("PlaybackStateStore 加载本地曲目")
         } catch {
             Log.player.error("PlaybackStateStore 加载失败：\(error.localizedDescription)")
         }
@@ -538,7 +664,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
             position: engineState.position,
             duration: engineState.duration,
             isCoreIdle: engineState.isCoreIdle,
-            queue: queueSnapshot
+            queue: queueSnapshot,
+            playbackError: engineState.playbackError
         )
     }
 
@@ -553,8 +680,10 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     /// 重建快照并在真正变化时向订阅者广播（锁外 yield）。
     private func publish() {
-        let next = currentSnapshot()
+        publicationLock.lock()
+        defer { publicationLock.unlock() }
         lock.lock()
+        let next = currentSnapshot()
         guard next != stateValue else {
             lock.unlock()
             return

@@ -199,6 +199,10 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
 
     private var subscription: Task<Void, Never>?
     private var attachedValue = false
+    private var stopped = false
+    private var subscriptionGeneration: UUID?
+    private let lifecycleLock = NSLock()
+    private let flushLock = NSLock()
 
     private let clock: @Sendable () -> Date
     private let dayStarter: @Sendable (Date) -> Date
@@ -269,46 +273,70 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
 
     /// 订阅播放内存态快照并启动周期 flush。幂等：重复调用只保留一个订阅。
     public func attach(to store: PlaybackStateStore) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
         lock.lock()
         guard !attachedValue else {
             lock.unlock()
             return
         }
+        let generation = UUID()
+        subscriptionGeneration = generation
+        stopped = false
         attachedValue = true
         lock.unlock()
 
         let stream = store.observeState()
         subscription = Task { [weak self] in
             for await snapshot in stream {
-                guard let self else { return }
-                self.handle(snapshot)
+                guard let self, !Task.isCancelled else { return }
+                self.handle(snapshot, generation: generation)
             }
         }
         timer.schedule(every: flushInterval) { [weak self] in
             self?.flush(reason: .periodic)
         }
-        Log.player.info("统计写入管道已接入：周期 flush \(Int(self.flushInterval))s")
     }
 
-    /// 退出/拆卸：先把内存里没落库的增量写出去，再取消订阅与定时器。幂等，可重复调用。
+    /// Invalidate queued observations before settling the final listening segment.
     public func stop() {
-        flush(reason: .termination)
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
         subscription?.cancel()
         subscription = nil
         timer.cancel()
         lock.lock()
+        subscriptionGeneration = nil
         attachedValue = false
+        stopped = true
+        let now = clock()
+        collectSegmentLocked(at: now)
+        if let id = currentTrackId { finalizePlayLocked(trackId: id, at: now) }
+        isPlaying = false
+        segmentStart = nil
+        currentTrackId = nil
+        currentPlayListenedSeconds = 0
+        hasCountedCurrentPlay = false
+        currentPlayDurationSeconds = 0
         lock.unlock()
+        flush(reason: .termination)
     }
 
     // MARK: - 快照消费（状态机）
 
     /// 处理一份播放内存态快照。内部接口，测试可直接喂构造好的快照做确定性断言。
     func handle(_ snapshot: PlaybackSnapshot) {
-        let now = clock()
-        var flushReason: PlaybackStatsFlushReason?
+        handle(snapshot, generation: nil)
+    }
 
+    private func handle(_ snapshot: PlaybackSnapshot, generation: UUID?) {
+        var flushReason: PlaybackStatsFlushReason?
         lock.lock()
+        guard !stopped, generation == nil || generation == subscriptionGeneration else {
+            lock.unlock()
+            return
+        }
+        let now = clock()
         // 先把「上一次快照到现在」这段播放时间计入内存桶 —— 必须先结算再判断边界，
         // 否则切歌那一刻的这段收听会丢。
         collectSegmentLocked(at: now)
@@ -407,10 +435,14 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
     /// - Returns: 本次 flush 是否成功（空载荷也视为成功）。
     @discardableResult
     public func flush(reason: PlaybackStatsFlushReason = .manual) -> Bool {
+        flushLock.lock()
+        defer { flushLock.unlock() }
         // 取桶 + 清空必须在同一把锁里完成：这样「同一段收听」只可能被取走一次，
         // 并发到来的第二次 flush 拿到的一定是空载荷。
         lock.lock()
-        collectSegmentLocked(at: clock())
+        let now = clock()
+        collectSegmentLocked(at: now)
+        if let id = currentTrackId { finalizePlayLocked(trackId: id, at: now) }
         let payload = pendingBuckets.compactMap { key, bucket -> PlaybackStatsDelta? in
             let delta = PlaybackStatsDelta(
                 trackId: key.trackId,

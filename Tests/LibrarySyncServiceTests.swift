@@ -171,6 +171,70 @@ final class LibrarySyncServiceTests: XCTestCase {
         )
     }
 
+    func testMissingRootDoesNotDeleteTracksFavoritesPlaylistsOrCovers() throws {
+        let service = makeService()
+        _ = try service.sync(directory: libraryDir)
+        let library = LibraryRepository(provider)
+        let before = try library.allTracksSorted(by: .title)
+        let covered = try XCTUnwrap(before.first { $0.coverPath != nil })
+        let coverPath = try XCTUnwrap(covered.coverPath)
+        let coverBytes = try Data(contentsOf: URL(fileURLWithPath: coverPath))
+        let playlists = PlaylistRepository(provider)
+        let playlist = try playlists.create(name: "Keep me")
+        try playlists.addTrack(playlistId: playlist.id, trackId: covered.id)
+        try FavoriteRepository(provider).favorite(trackId: covered.id)
+
+        let offline = tempDir.appendingPathComponent("offline", isDirectory: true)
+        try FileManager.default.moveItem(at: libraryDir, to: offline)
+        XCTAssertThrowsError(try service.sync(directory: libraryDir)) { error in
+            XCTAssertEqual(error as? LibrarySyncError, .incompleteScan(self.libraryDir.standardizedFileURL))
+        }
+        XCTAssertEqual(try library.allTracksSorted(by: .title), before)
+        XCTAssertEqual(try playlists.entries(playlistId: playlist.id).map(\.id), [covered.id])
+        XCTAssertTrue(try FavoriteRepository(provider).isFavorited(trackId: covered.id))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: coverPath)), coverBytes)
+    }
+
+    func testUnreadableSubdirectoryRejectsPartialSnapshotAndPreservesCache() throws {
+        let hidden = libraryDir.appendingPathComponent("locked", isDirectory: true)
+        try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: fixtureDir.appendingPathComponent("untagged.wav"),
+                                         to: hidden.appendingPathComponent("hidden.wav"))
+        let scanner = LibraryScanner()
+        let service = LibrarySyncService(database: provider, scanner: scanner)
+        _ = try service.sync(directory: libraryDir)
+        let before = try LibraryRepository(provider).allTracksSorted(by: .title)
+        let cached = scanner.scan(directory: libraryDir)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: hidden.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hidden.path) }
+        if (try? FileManager.default.contentsOfDirectory(atPath: hidden.path)) != nil {
+            throw XCTSkip("This user can enumerate permission-denied directories")
+        }
+
+        let partial = scanner.scan(directory: libraryDir)
+        XCTAssertFalse(partial.isComplete)
+        XCTAssertEqual(partial.removedCount, 0)
+        XCTAssertThrowsError(try service.sync(directory: libraryDir))
+        XCTAssertEqual(try LibraryRepository(provider).allTracksSorted(by: .title), before)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hidden.path)
+        let restored = scanner.scan(directory: libraryDir)
+        XCTAssertTrue(restored.isComplete)
+        XCTAssertEqual(restored.tracks.map(\.id), cached.tracks.map(\.id))
+        XCTAssertEqual(restored.scannedCount, 0)
+    }
+
+    func testSuccessfullyScannedEmptyRootStillRemovesMissingTracks() throws {
+        let service = makeService()
+        _ = try service.sync(directory: libraryDir)
+        for file in try FileManager.default.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil) {
+            try FileManager.default.removeItem(at: file)
+        }
+        let result = try service.sync(directory: libraryDir)
+        XCTAssertEqual(result.removed, 3)
+        XCTAssertEqual(result.totalCount, 0)
+    }
+
     // MARK: - 素材工具
 
     private func makeService() -> LibrarySyncService {

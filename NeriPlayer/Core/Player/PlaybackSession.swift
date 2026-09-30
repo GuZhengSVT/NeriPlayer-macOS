@@ -22,8 +22,8 @@
 // 写一次要序列化整个队列；这边是 SQLite 单行 upsert，防抖省下的 I/O 抵不上它引入的
 // 「防抖窗口内退出可能丢最后一次变更」这一类时序问题。
 //
-// 边界（不做）：音源解析与重播（M5）—— 本任务只按「可持久化」规则存本地文件队列，
-// 临时音源地址（M5 的带签名 URL）在持久化时被剔除，理由见 PlaybackSessionPolicy。
+// M5: stable online SongData now joins local files in durable queues; temporary URLs remain excluded.
+// URL resolution and recovery are owned by OnlinePlaybackCoordinator, not this recorder.
 
 import Foundation
 
@@ -34,12 +34,10 @@ public enum PlaybackSessionPolicy {
 
     /// 该轨道是否值得写进持久化现场。
     ///
-    /// 只有本地文件算「可持久化」。在线音源（M5）拿到的播放地址通常是带签名与有效期的临时
-    /// URL —— 存下来下次启动必然失效，恢复出来的只会是一串点了没反应的队列项。因此这类轨道
-    /// 在落库前被剔除；真正「重开也能播」的在线队列要等 M5 拿音源标识重新解析地址，
-    /// 那是 M5 的范围，不在本任务里假装支持。
+    /// Local files and normalized online identities are durable; anonymous temporary URLs are not.
+    /// The codec stores SongData and its identity URL, never CDN headers or signed playback URLs.
     public static func isDurable(_ track: Track) -> Bool {
-        track.url.isFileURL
+        track.url.isFileURL || track.onlineSong != nil
     }
 }
 
@@ -119,14 +117,14 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
     /// 进度刻意不在其中 —— 它走阈值，不做逐步比较。播放意图（shouldResumePlayback）必须在内：
     /// 暂停与继续播放的队列、索引、进度可能完全相同，只有它能触发一次写盘。
     private struct SessionSignature: Equatable {
-        var trackIDs: [UUID]
+        var tracks: [Track]
         var currentIndex: Int?
         var mode: PlaybackMode
         var shuffleOrder: [UUID]
         var shouldResumePlayback: Bool
 
         init(_ state: PlayerState) {
-            trackIDs = state.tracks.map(\.id)
+            tracks = state.tracks
             currentIndex = state.currentIndex
             mode = state.mode
             shuffleOrder = state.shuffleOrder
@@ -135,6 +133,9 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    // Serialize persistence without holding the state lock across injected I/O.
+    private let writeLock = NSLock()
+    private var hasWritten = false
     /// 最近一次快照投影出的现场；nil 表示「当前没有可恢复的内容」。
     private var latest: PlayerState?
     /// 最近一次真正写下去的内容，用于跳过重复写盘。
@@ -143,6 +144,8 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
     /// 后者若按前者处理，启动后立刻退出会把刚恢复的现场清掉。
     private var hasObserved = false
     private var subscription: Task<Void, Never>?
+    private var subscriptionGeneration: UUID?
+    private var stopped = false
 
     private let save: SaveHandler
     private let clear: ClearHandler
@@ -194,11 +197,14 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
         }
         // 占位标记与真正的订阅任务分两步：订阅时会同步推一次当前快照，
         // 持有 lock 去构造流没有必要，也会把「检查—赋值」拉成一个跨调用的临界区。
+        let generation = UUID()
+        subscriptionGeneration = generation
+        stopped = false
         let stream = store.observeState()
         let task = Task { [weak self] in
             for await snapshot in stream {
-                guard let self else { return }
-                self.handle(snapshot)
+                guard let self, !Task.isCancelled else { return }
+                self.handle(snapshot, generation: generation)
             }
         }
         subscription = task
@@ -221,8 +227,13 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
         lock.lock()
         let task = subscription
         subscription = nil
+        subscriptionGeneration = nil
+        stopped = true
         lock.unlock()
         task?.cancel()
+        // Drain any write already in flight before returning to shutdown.
+        writeLock.lock()
+        writeLock.unlock()
     }
 
     // MARK: - 内部
@@ -232,50 +243,47 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
     /// internal 而非 private：写盘时机是纯逻辑，单测直接喂快照即可确定性覆盖，
     /// 不必依赖订阅与调度的时序（订阅路径本身由端到端用例覆盖）。
     func handle(_ snapshot: PlaybackSnapshot) {
+        handle(snapshot, generation: nil)
+    }
+
+    private func handle(_ snapshot: PlaybackSnapshot, generation: UUID?) {
         let projection = snapshot.restorablePlayerState(keeping: isDurable, now: now())
 
-        var shouldWrite = false
         lock.lock()
-        let previous = latest
-        let observedBefore = hasObserved
+        guard !stopped, generation == nil || generation == subscriptionGeneration else {
+            lock.unlock()
+            return
+        }
         latest = projection
         hasObserved = true
-        switch (previous, projection) {
-        case let (previous?, projection?):
-            // 有旧有新：结构变了立刻写；只有进度推进则攒够步长再写。
-            let structChanged = SessionSignature(previous) != SessionSignature(projection)
-            // 进度基准必须是「上次真正落库的位置」，不能是上一份快照：mpv 的 time-pos 事件
-            // 间隔（约 1 秒）小于步长（2 秒），拿相邻快照做差会每一步都不到阈值，
-            // 于是永远攒不够、等于完全不落库 —— 进度会被无限期地拖在起点上。
-            let positionAdvanced = lastWritten.map {
-                abs(projection.position - $0.position) >= positionStep
-            } ?? true
-            shouldWrite = structChanged || positionAdvanced
-        default:
-            // 新出现或变为空：都是「现场性质」的变化，值得写一次。
-            // observedBefore 为 false 时同样写 —— 这是启动后的第一份现场。
-            shouldWrite = true
-        }
         lock.unlock()
-
-        guard shouldWrite else { return }
-        write(reason: observedBefore ? "快照变化" : "首次快照", force: false)
+        write(reason: "快照变化", force: false)
     }
 
     /// 落库当前现场（latest 为 nil 则清除）。
     /// - Parameter force: true 时忽略「与上次写入相同」的短路。
     private func write(reason: String, force: Bool) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
         lock.lock()
         guard hasObserved else {
             lock.unlock()
             return
         }
         let state = latest
-        if !force, contentEquals(state, lastWritten) {
-            lock.unlock()
-            return
+        if !force, hasWritten {
+            let belowStep: Bool
+            if let state, let lastWritten {
+                belowStep = SessionSignature(state) == SessionSignature(lastWritten)
+                    && abs(state.position - lastWritten.position) < positionStep
+            } else {
+                belowStep = false
+            }
+            if contentEquals(state, lastWritten) || belowStep {
+                lock.unlock()
+                return
+            }
         }
-        lastWritten = state
         lock.unlock()
 
         do {
@@ -289,10 +297,14 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
                 try clear()
                 Log.db.debug("清除播放现场（\(reason)）：当前没有可恢复的内容")
             }
-        } catch {
-            // 写失败不改变内存态，只把「已写入」标记退回去，让下一次快照再试一遍。
             lock.lock()
-            lastWritten = nil
+            lastWritten = state
+            hasWritten = true
+            lock.unlock()
+        } catch {
+            // A failed clear is not equivalent to a successfully persisted empty state.
+            lock.lock()
+            hasWritten = false
             lock.unlock()
             Log.db.error("播放现场保存失败（\(reason)）：\(error.localizedDescription)")
         }

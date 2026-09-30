@@ -76,22 +76,14 @@ public struct KaraokeSyllable: Sendable, Equatable {
     /// 原库在这里 `require(end >= start)`，坏数据会抛异常中断整份解析。移植后改成钳到非负：
     /// 解析器已经在能修的地方修（`rearrangeTime` 会把前一音节的 end 拉到后一音节的 start），
     /// 修不了的地方也不该炸掉整首歌。
-    public var duration: Int { max(end - start, 0) }
+    public var duration: Int { LyricsTime.duration(start: start, end: end) }
 
     /// 当前时间在本音节内的进度 0…1。
     ///
     /// 原库 `progress(current)`；差别只在 `duration == 0`：原库会算出 NaN（0/0），
     /// 这里判定为「已走完」返回 1，渲染端不至于拿到 NaN 去乘宽度。
     public func progress(current: Int) -> Float {
-        let value: Float
-        if current < start {
-            value = 0
-        } else if current <= end {
-            value = duration > 0 ? Float(current - start) / Float(duration) : 1
-        } else {
-            value = 1
-        }
-        return min(max(value, 0), 1)
+        LyricsTime.progress(current: current, start: start, end: end)
     }
 }
 
@@ -132,17 +124,7 @@ extension KaraokeLine {
 
     /// 当前时间在本行内的进度 0…1（原库 `KaraokeLine.progress`）。
     public func progress(current: Int) -> Float {
-        let value: Float
-        if current < start {
-            value = 0
-        } else if isFocused(current: current) {
-            value = duration > 0 ? Float(current - start) / Float(duration) : 1
-        } else if current > end {
-            value = 1
-        } else {
-            value = 0
-        }
-        return min(max(value, 0), 1)
+        LyricsTime.progress(current: current, start: start, end: end)
     }
 
     /// 当前时间是否落在本行区间内（原库 `KaraokeLine.isFocused`）。
@@ -179,7 +161,7 @@ public struct MainKaraokeLine: KaraokeLine {
     public var accompanimentLines: [AccompanimentKaraokeLine]?
 
     /// 时长，毫秒。容错口径同 `SyncedLine`：音节乱序时钳到非负。
-    public var duration: Int { max(end - start, 0) }
+    public var duration: Int { LyricsTime.duration(start: start, end: end) }
 
     public init(
         syllables: [KaraokeSyllable],
@@ -211,7 +193,7 @@ public struct AccompanimentKaraokeLine: KaraokeLine {
     public var phonetic: String?
 
     /// 时长，毫秒。容错口径同 `SyncedLine`。
-    public var duration: Int { max(end - start, 0) }
+    public var duration: Int { LyricsTime.duration(start: start, end: end) }
 
     public init(
         syllables: [KaraokeSyllable],

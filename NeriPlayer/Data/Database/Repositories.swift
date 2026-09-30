@@ -141,7 +141,7 @@ public struct LibraryRepository: Sendable {
         guard !tracks.isEmpty else { return 0 }
         try database.dbQueue.write { db in
             for track in tracks {
-                try TrackRecord(track: track).upsert(db)
+                try Self.upsertPlaybackFields(track, db: db)
             }
         }
         Log.db.debug("媒体库 upsert \(tracks.count) 首")
@@ -160,7 +160,7 @@ public struct LibraryRepository: Sendable {
         var deleted = 0
         try database.dbQueue.write { db in
             for track in tracks {
-                try TrackRecord(track: track).upsert(db)
+                try Self.upsertPlaybackFields(track, db: db)
             }
             // 保持清单的曲目：NOT IN 的占位符按清单长度生成，空清单时直接清空全表。
             if urls.isEmpty {
@@ -280,10 +280,13 @@ public struct LibraryRepository: Sendable {
 
                 guard let current = byUrl[record.url] else {
                     try record.insert(db)
+                    byUrl[record.url] = record
                     inserted += 1
                     continue
                 }
 
+                // Resolve the same cover fallback used by change detection before writing.
+                record.coverPath = record.coverPath ?? current.coverPath
                 if Self.hasContentChanges(record, comparedTo: current) {
                     // 只覆盖内容列：id 是主键、createdAt 是「首次入库时间」，都不随重扫改写。
                     try db.execute(sql: """
@@ -292,14 +295,17 @@ public struct LibraryRepository: Sendable {
                             format = ?, fingerprintMtime = ?, coverPath = ?
                         WHERE id = ?
                         """, arguments: [
-                        record.title, record.artist, record.album, record.durationSeconds,
-                        record.fileSize, record.format, record.fingerprintMtime, record.coverPath,
-                        current.id
-                    ])
+                            record.title, record.artist, record.album, record.durationSeconds,
+                            record.fileSize, record.format, record.fingerprintMtime, record.coverPath,
+                            current.id
+                        ])
                     updated += 1
                 } else {
                     skipped += 1
                 }
+                record.id = current.id
+                record.createdAt = current.createdAt
+                byUrl[record.url] = record
             }
 
             // 删除范围限定在本次扫描子树内：先把子树内「本轮未再出现」的行挑出来。
@@ -307,7 +313,7 @@ public struct LibraryRepository: Sendable {
                 let stale = existing.filter { record in
                     // 路径两侧都走 standardizedFileURL：macOS 上临时目录可能是 /var/... 而目录枚举
                     // 返回 /private/var/...，只有统一标准化后前缀比较才可靠。
-                    guard let recordURL = Self.url(record.url) else { return false }
+                    guard let recordURL = Self.url(record.url), recordURL.isFileURL else { return false }
                     guard Self.comparablePath(for: recordURL).hasPrefix(rootPrefix) else { return false }
                     return !incomingUrls.contains(record.url)
                 }
@@ -429,12 +435,26 @@ public struct LibraryRepository: Sendable {
         }
     }
 
+    /// A playback Track is only a projection, not a complete library record.
+    /// Never replace album/artwork/fingerprint/createdAt with its initializer defaults.
+    private static func upsertPlaybackFields(_ track: Track, db: Database) throws {
+        let url = TrackRecord.urlString(for: track.url)
+        if let existing = try TrackRecord.filter(Column("url") == url).fetchOne(db) {
+            existing.title = track.title
+            existing.artist = track.artist
+            existing.durationSeconds = track.duration
+            try existing.update(db, columns: ["title", "artist", "durationSeconds"])
+        } else {
+            try TrackRecord(track: track).insert(db)
+        }
+    }
+
     // MARK: 内部：合并/去重的纯函数
 
     /// 扫描根目录的「子树路径前缀」，用于把删除范围限定在本轮扫描的目录内。
     /// 末尾补 "/" 是为了让 `/music/a` 不会匹配到 `/music/ab`；根为 nil 时返回 nil（不删任何行）。
     private static func subtreePrefix(for root: URL?) -> String? {
-        guard let root else { return nil }
+        guard let root, root.isFileURL else { return nil }
         let path = comparablePath(for: root)
         return path.hasSuffix("/") ? path : path + "/"
     }

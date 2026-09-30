@@ -71,7 +71,7 @@ public struct NeteaseYrcParser: LyricsParser {
         guard let match = line.wholeMatch(of: Self.lineRegex) else { return nil }
         guard let lineStart = Int(match.output.1) else { return nil }
         guard let lineDuration = Int(match.output.2) else { return nil }
-        let lineEnd = lineStart + lineDuration
+        let lineEnd = LyricsTime.adding(lineStart, lineDuration)
         let content = String(match.output.3)
 
         let rawSyllables = content.matches(of: Self.syllableRegex).compactMap { syllableMatch -> KaraokeSyllable? in
@@ -80,7 +80,7 @@ public struct NeteaseYrcParser: LyricsParser {
             return KaraokeSyllable(
                 content: String(syllableMatch.output.3),
                 start: rawStart,
-                end: rawStart + duration
+                end: LyricsTime.adding(rawStart, duration)
             )
         }
 
@@ -154,8 +154,8 @@ public struct NeteaseYrcParser: LyricsParser {
 
         return syllables.map { syllable in
             var adjusted = syllable
-            adjusted.start = lineStart + syllable.start
-            adjusted.end = lineStart + syllable.end
+            adjusted.start = LyricsTime.adding(lineStart, syllable.start)
+            adjusted.end = LyricsTime.adding(lineStart, syllable.end)
             return adjusted
         }
     }

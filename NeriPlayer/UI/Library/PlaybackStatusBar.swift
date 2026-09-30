@@ -29,11 +29,10 @@ enum PlaybackStatusText {
         return "\(state) · \(track.title) — \(artist)"
     }
 
-    /// 播放状态的短标签。空闲态优先于暂停态判断：自然播完/已停止时 engine 会把暂停复位为
-    /// false，若先看 isPaused 就会把「已停止」显示成「播放中」。
+    /// libmpv 暂停时也会 core-idle，必须优先显示暂停。stop 会清除 pause。
     static func stateLabel(isPaused: Bool, isCoreIdle: Bool) -> String {
-        if isCoreIdle { return "已停止" }
-        return isPaused ? "已暂停" : "正在播放"
+        if isPaused { return "已暂停" }
+        return isCoreIdle ? "已停止" : "正在播放"
     }
 
     /// 歌手缺失时回落「未知歌手」；与媒体库列表的占位写法保持一致。
@@ -51,6 +50,7 @@ struct PlaybackStatusBar: View {
 
     /// 点击状态条的动作（通常是把主窗口切到媒体库 tab）。为 nil 时整条不可点。
     var onActivate: (() -> Void)?
+    var onLyrics: (() -> Void)?
 
     @EnvironmentObject private var appState: AppState
     /// 当前订阅的播放内存态。为什么不直接读 appState.playbackStore：播放集成可能晚于本视图出现
@@ -71,7 +71,7 @@ struct PlaybackStatusBar: View {
         .task(id: playbackStore.map(ObjectIdentifier.init)) {
             // id 用 store 的对象标识：播放集成未就绪（nil）时这条 task 立刻结束；
             // store 出现或换成另一个实例时 id 变化，task 重跑并接到新的快照流上。
-            guard let store = playbackStore else { return }
+            guard let store = playbackStore else { snapshot = nil; return }
             for await next in store.observeState() {
                 snapshot = next
             }
@@ -92,6 +92,12 @@ struct PlaybackStatusBar: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 8)
+                if let onLyrics {
+                    Button(action: onLyrics) { Image(systemName: "text.alignleft") }
+                        .buttonStyle(.borderless)
+                        .help("打开歌词")
+                        .accessibilityLabel("打开歌词")
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -103,7 +109,8 @@ struct PlaybackStatusBar: View {
 
     /// 暂停/停止/播放三种图标；空闲优先于暂停，理由同 PlaybackStatusText.stateLabel。
     private var iconName: String {
-        guard let snapshot, !snapshot.isCoreIdle else { return "stop.circle" }
-        return snapshot.isPaused ? "pause.circle" : "play.circle"
+        guard let snapshot else { return "stop.circle" }
+        if snapshot.isPaused { return "pause.circle" }
+        return snapshot.isCoreIdle ? "stop.circle" : "play.circle"
     }
 }

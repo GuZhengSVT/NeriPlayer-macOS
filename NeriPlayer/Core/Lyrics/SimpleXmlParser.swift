@@ -18,8 +18,8 @@
 //
 // 与原库的实现差异（有意为之）：
 //   - `decodeXmlEntities`：原库放在 TTMLParser 里（TTMLParser.kt:41），职责上属于 XML 层，
-//     这里上移到 `SimpleXmlParser.decodeEntities`，行为逐条相同（只认 5 个常见实体，不碰
-//     数字实体 `&#xxx;`）。TTMLParser 仍按原逻辑在「取文本」的那一步调用它。
+//     这里上移到 `SimpleXmlParser.decodeEntities`，每个实体只解码一次，支持合法数字实体。
+//     TTMLParser 在「取文本」时调用它。
 //   - Kotlin 的 `MutableElement` 是可变累加器，Swift 里保留同名 private struct：解析中途
 //     必须往子节点数组和文本缓冲里追加，纯值类型整体替换会写成 O(n²)。
 //   - 原库的 `internal class SimpleXmlParser`（需要 new 一个实例）改成无状态 `public struct` +
@@ -58,7 +58,7 @@ public struct XmlElement: Sendable, Equatable {
     /// 属性列表，按出现顺序。
     public let attributes: [XmlAttribute]
 
-    /// 子元素，按出现顺序；标签之间/内部的空白会以 `#text` 元素的形式出现在这里。
+    /// 子元素和所有直接文本片段，按文档顺序排列；文本使用 `#text` 节点。
     public let children: [XmlElement]
 
     /// 直接文本内容（已 trim、未做实体解码）。
@@ -84,7 +84,7 @@ public struct XmlElement: Sendable, Equatable {
     /// 属性名以 `:role` 结尾即可，不限定前缀：`ttm:role`、`role` 都能命中，因为不同工具
     /// 导出的 TTML 前缀并不统一。
     public func hasRole(_ role: String) -> Bool {
-        attributes.contains { $0.name.hasSuffix(":role") && $0.value == role }
+        attributes.contains { ($0.name == "role" || $0.name.hasSuffix(":role")) && $0.value == role }
     }
 }
 
@@ -134,8 +134,8 @@ public struct SimpleXmlParser: Sendable {
                     let endIndex = Self.firstIndexOf("?>", in: characters, from: index + 2)
                     index = endIndex.map { $0 + 2 } ?? characters.count
                 } else {
-                    // 开标签（含自闭合）。
-                    guard let endIndex = Self.firstIndex(of: ">", in: characters, from: index + 1) else { break }
+                    // A quoted attribute may contain a literal >.
+                    guard let endIndex = Self.tagEnd(in: characters, from: index + 1) else { break }
 
                     var tagPart = String(characters[(index + 1)..<endIndex])
                     let isSelfClosing = tagPart.hasSuffix("/")
@@ -178,6 +178,9 @@ public struct SimpleXmlParser: Sendable {
                 let rawText = nextTagIndex.map { String(characters[index..<$0]) } ?? String(characters[index...])
                 if !rawText.isEmpty && !stack.isEmpty {
                     stack[stack.count - 1].text += rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    stack[stack.count - 1].children.append(
+                        XmlElement(name: "#text", attributes: [], children: [], text: rawText)
+                    )
                 }
                 index = nextTagIndex ?? characters.count
             }
@@ -192,16 +195,39 @@ public struct SimpleXmlParser: Sendable {
 
     /// 解码 XML 常见实体（原库 `TTMLParser.decodeXmlEntities`）。
     ///
-    /// 只认这 5 个命名实体，数字实体（`&#39;`）保持原样 —— 与原库一致。没有 `&` 时直接返回，
-    /// 省掉 5 次全串扫描。
+    /// Decode named and valid numeric references once; malformed references remain literal.
+    /// No external entity/DTD loading is performed.
     public static func decodeEntities(_ text: String) -> String {
         if !text.contains("&") { return text }
-        return text
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&lt;", with: "<")
-            .replacingOccurrences(of: "&gt;", with: ">")
-            .replacingOccurrences(of: "&apos;", with: "'")
-            .replacingOccurrences(of: "&quot;", with: "\"")
+        var result = ""
+        var cursor = text.startIndex
+        let named = ["amp": "&", "lt": "<", "gt": ">", "apos": "'", "quot": "\""]
+        while cursor < text.endIndex {
+            guard text[cursor] == "&", let end = text[cursor...].prefix(32).firstIndex(of: ";") else {
+                result.append(text[cursor])
+                cursor = text.index(after: cursor)
+                continue
+            }
+            let name = String(text[text.index(after: cursor)..<end])
+            var decoded = named[name]
+            if name.hasPrefix("#") {
+                let hex = name.hasPrefix("#x")
+                if let code = UInt32(name.dropFirst(hex ? 2 : 1), radix: hex ? 16 : 10),
+                   code == 9 || code == 10 || code == 13 || (0x20...0xD7FF).contains(code)
+                    || (0xE000...0xFFFD).contains(code) || (0x10000...0x10FFFF).contains(code),
+                   let scalar = UnicodeScalar(code) {
+                    decoded = String(scalar)
+                }
+            }
+            if let decoded {
+                result += decoded
+                cursor = text.index(after: end)
+            } else {
+                result.append(text[cursor])
+                cursor = text.index(after: cursor)
+            }
+        }
+        return result
     }
 
     // MARK: 标签与属性
@@ -213,7 +239,7 @@ public struct SimpleXmlParser: Sendable {
     /// 里不存在，改宽反而会和原库行为分叉。
     private static func parseTagAndAttributes(_ tagPart: String) -> (name: String, attributes: [XmlAttribute]) {
         let characters = Array(tagPart)
-        guard let firstSpace = characters.firstIndex(of: " ") else { return (tagPart, []) }
+        guard let firstSpace = characters.firstIndex(where: { $0.isWhitespace }) else { return (tagPart, []) }
 
         let tagName = String(characters[0..<firstSpace])
         var attributes: [XmlAttribute] = []
@@ -249,6 +275,21 @@ public struct SimpleXmlParser: Sendable {
     }
 
     // MARK: 索引工具（对应 Kotlin 的 indexOf / startsWith）
+
+    private static func tagEnd(in characters: [Character], from start: Int) -> Int? {
+        var quote: Character?
+        for index in start..<characters.count {
+            let character = characters[index]
+            if let active = quote {
+                if character == active { quote = nil }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+        }
+        return nil
+    }
 
     private static func firstIndex(of needle: Character, in characters: [Character], from start: Int) -> Int? {
         guard start >= 0 else { return nil }

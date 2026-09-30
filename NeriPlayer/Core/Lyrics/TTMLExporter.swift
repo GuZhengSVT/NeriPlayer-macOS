@@ -6,8 +6,7 @@
 // 用途：解析后的歌词再导出成 TTML。当前只有测试用它做往返验证（parse → export → parse），
 // 但它决定了「歌词能不能无损过一遍序列化」，所以边界处理要按原库逐字节对齐：
 //   - SyncedLine 的正文与译文都转义 `& < >`；
-//   - 卡拉OK音节的**正文**转义、**译文**不转义 —— 原库这里就没转义（与 SyncedLine 分支不一致）。
-//     这是个上游小 bug，但保留：改了会让导出的字节与 Kotlin 版不同，往返测试的期望值也就变了。
+//   - 卡拉OK正文与译文都转义，修复上游未转义译文导致 XML 损坏的问题。
 //   - 文本先 `trim()` 再转义（音节与译文）；SyncedLine 的正文不 trim，原样转义。
 //   - 正文里原本以空格结尾的音节，在 `</span>` 之后补一个空格（歌词的词间空格就是靠它留住的）。
 //
@@ -153,9 +152,9 @@ public struct TTMLExporter: LyricsExporter {
             if rawContent.hasSuffix(" ") { output += " " }
         }
         if let translation {
-            // 注意：这里没有 escapeXML —— 与原库一致（见文件头「有意差异」前的说明）。
+            // Translation is XML text, just like syllable content.
             output += #"<span ttm:role="x-translation" xml:lang="zh-CN">"#
-                + translation.trimmingCharacters(in: .whitespacesAndNewlines)
+                + Self.escapeXML(translation.trimmingCharacters(in: .whitespacesAndNewlines))
                 + #"</span>"#
         }
         return output

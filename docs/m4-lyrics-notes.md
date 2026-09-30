@@ -1,6 +1,7 @@
 # M4 歌词系统 —— 移植工作笔记
 
-> 状态：**M4-T1 已完成**（契约/模型层 + 全部解析器 + 导出器，149 条单测，全量 499 条全绿）。
+> 状态：M4-T1–T6 实现已落地；最终测试与人工截图验收见 `docs/acceptance/m4.md`。
+> 2026-09-30 审查补充见 [审查记录](code-review-2026-09-30.md)：修复整数溢出、XML 实体/混合内容顺序、翻译转义等；本轮补齐歌词来源、播放绑定、SwiftUI 界面、逐字高亮与 PNG 导出。
 > 参考实现：`/Volumes/taurus/Document/Code/NeriPlayer/np-submodule/accompanist-lyrics-core`
 > （Kotlin Multiplatform，`src/commonMain` 共约 2156 行，纯逻辑、无平台依赖，可逐文件平移）
 
@@ -52,8 +53,8 @@
    原库用 sealed interface + 到处 `when (line) { is KaraokeLine -> …; is SyncedLine -> … }`，
    其中还夹着 `else -> ""` 兜底分支。Swift 用枚举后 switch 必须穷尽，兜底分支在编译期消失，
    渲染端（T4/T5）也能直接取音节数组。
-2. **`UncheckedSyncedLine` 不移植**：它在原模块里只有定义、没有任何引用（全模块 grep 确认），
-   搬过来就是没人构造的死代码。
+2. **`UncheckedSyncedLine` 保留为兼容模型**：当前源码与测试已有此类型，但不进入
+   `LyricsLine` 联合类型，解析和渲染以 `.synced` / `.main` / `.accompaniment` 为准。
 3. **`KaraokeSyllable` 的 `require(end >= start)` 改成钳制**：原库坏数据会抛异常中断整份解析。
    解析器已经在能修的地方修（`rearrangeTime()`），修不了的地方也不该让整首歌没歌词。
    连带后果：`duration == 0` 时 `progress` 不能照抄除法（会 NaN），判定为"已走完"返回 1。
@@ -92,8 +93,26 @@
 
 ## 5. 还没做的（留给后续任务）
 
-1. **网易云歌词接口**（M4-T2）：原库这一段在 Android 侧（`data/lyrics`），不在本子模块里，
-   要到 M5 的在线链路才有真数据，届时按 URLSession 重写。
-2. **`PhoneticProvider` 的两个实现**（日文假名 / 中文拼音）不在本子模块中，M4-T1 只落协议；
-   TTML 在没有 provider 时必须能正常工作（已有单测覆盖）。
-3. **`LyricsLine.progress` 的逐行用法**要等 M4-T4 渲染时才会被真正验证。
+1. **在线歌曲播放与登录**属于 M5；M4 已接独立 URLSession 网易云歌词接口，只对显式关联 ID 请求。
+2. **`PhoneticProvider` 的两个自动生成实现**（日文假名 / 中文拼音）不在本子模块中，M4 只落协议；
+   TTML / KRC / 网易云现有音译可以直接显示，不会自行生成不存在的音译。
+3. **硬件与性能专项人工验收**：Instruments 60fps 与真实发布包沙盒尚未证实，窗口截图与逻辑测试不是性能证明。
+
+## 6. 审查后的约束
+
+- Swift 整数不会像 Kotlin Long 一样默认回绕；外部时间戳使用饱和算术，避免溢出 trap。
+- XML 实体只解码一次；保留文本与 span 的文档顺序，翻译导出必须转义。
+- 当前为宽容解析器，不是完整 TTML/XML 实现；CDATA、完整命名空间与嵌套深度限制尚待完善。
+- LRC offset 保留在 `LyricsDocument`，`LyricsViewModel.totalOffset` 只组合一次文件与用户偏移；时间轴正偏移提前、点击跳转反向扣除。
+- 生产播放绑定使用新 `LyricsTimeline`，区间树覆盖嵌套长行；原模型历史二分 API 保留但不用于新 UI。
+- 文本格式导出时音译/顶层伴唱/对齐信息完整性仍需后续专项用例；PNG 卡片导出聚焦选中正文和可选译文。
+
+## 7. M4-T2–T6 落点
+
+- `LyricsProvider.swift`：本地 sidecar、纯文本、网易云歌词、翻译与音译合并；不更改音频扫描逻辑。
+- `LyricsTimeline.swift`：预索引时间轴与音节进度，毫秒/秒饱和换算。
+- `LyricsViewModel.swift`：播放快照适配、异步请求取消及 generation 防旧响应、按文件地址存关联与偏移。
+- `LyricsView.swift` / `KaraokeText.swift`：SwiftUI 滚动、原生 TextKit 字形排版与音节裁切，渲染最多补间 300ms 后等待播放器进度，不盲目累计计时。
+- `LyricsPreferencesView.swift`：字号、模糊、翻译、音译、偏移和网易云歌曲 ID。
+- `LyricsShareView.swift` / `LyricsCardExporter.swift`：选择 1–6 行、1080px 位图预览、保存和复制；资源上限防超长输入分配过大图像。
+- 测试与截图见 [M4 验收](acceptance/m4.md)。

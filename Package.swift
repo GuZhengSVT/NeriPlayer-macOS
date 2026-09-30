@@ -1,5 +1,6 @@
 // swift-tools-version: 5.10
 // NeriPlayer macOS —— SwiftPM 清单。
+// 当前锁定的 GRDB 7.11.1 要求 Swift 6.1+；主目标暂保留 Swift 5 语言模式。
 // M0-T2：引入 GRDB 作为数据库层依赖。SwiftLint 通过 Homebrew 二进制 + Tools/run-swiftlint.sh 集成，
 // 不进入 SPM 依赖图（理由见 M0-T2 报告）。
 // M1-T2：新增 CMpv（libmpv C API 桥接）target，并为 NeriPlayer/NeriPlayerTests 补 rpath。
@@ -11,17 +12,11 @@ import Foundation
 // Vendor 路径计算。
 // 为什么不用相对路径：SwiftPM 求值清单时的 cwd 不是包根目录（实测为本进程 cwd），
 // 用 #filePath 反推包根才能保证从任意目录调用 swift build 都成立。
-// 已知限制：绝对路径含空格时 SPM 的 -I/-L/-rpath 参数无法转义；本仓库路径不含空格。
+// 路径作为独立参数传递；不要拼接 shell 命令或手动添加引号。
 let packageRootDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let vendorMpvDir = packageRootDir + "/Vendor/mpv"
 let vendorMpvIncludeDir = vendorMpvDir + "/include"
 let vendorMpvLibDir = vendorMpvDir + "/lib"
-
-// 供 CMpv 及其消费方共用的头文件搜索路径。
-// 为什么消费方也要加：CMpv.h 里 #include <mpv/client.h>，而 SwiftPM 不会把某个 target
-// cSettings 里的 unsafeFlags 传递给依赖它的 target，所以 import CMpv 的 Swift 目标
-// 必须自己再声明一次这个 -I，否则 clang 模块构建时报 "'mpv/client.h' file not found"。
-let vendorMpvCSettings: [CSetting] = [.unsafeFlags(["-I", vendorMpvIncludeDir])]
 
 // 依赖声明拆成命名常量：manifest 是一段普通 Swift 代码，全部塞进 Package(...) 一个
 // 大表达式时，类型检查器会在表达式复杂度上超时（"unable to type-check this expression
@@ -62,6 +57,7 @@ let appTarget: Target = .executableTarget(
         .product(name: "TagLibSwift", package: "TagLibSwift"),
     ],
     path: "NeriPlayer",
+    resources: [.copy("Resources/YouTubeMusic")],
     swiftSettings: [
         // 把 mpv 头文件搜索路径透传给 Swift 编译器的 clang importer，
         // 否则 import CMpv 时构建 CMpv 模块会因为找不到 mpv/client.h 失败。

@@ -49,19 +49,23 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var artist: String?
     /// 时长（秒）；未知为 nil（真实时长以引擎读到的为准）。
     public var duration: Double?
+    /// Stable online identity; temporary signed URLs never enter the queue.
+    public var onlineSong: SongData?
 
     public init(
         id: UUID = UUID(),
         url: URL,
         title: String? = nil,
         artist: String? = nil,
-        duration: Double? = nil
+        duration: Double? = nil,
+        onlineSong: SongData? = nil
     ) {
         self.id = id
         self.url = url
         self.title = title ?? url.deletingPathExtension().lastPathComponent
         self.artist = artist
         self.duration = duration
+        self.onlineSong = onlineSong
     }
 }
 

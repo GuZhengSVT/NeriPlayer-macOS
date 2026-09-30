@@ -100,7 +100,7 @@ public struct LyricifySyllableParser: LyricsParser {
             // （全角数字 `١` 虽能通过字符判断，但 Int 解析不出，同样退化成 0，与原库一致）。
             if LyricsTime.isDigitsOnly(startText), LyricsTime.isDigitsOnly(durationText),
                let start = Int(startText), let duration = Int(durationText) {
-                return KaraokeSyllable(content: String(matched.output.1), start: start, end: start + duration)
+                return KaraokeSyllable(content: String(matched.output.1), start: start, end: LyricsTime.adding(start, duration))
             }
             return KaraokeSyllable(content: "Error", start: 0, end: 0)
         }

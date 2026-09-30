@@ -33,9 +33,9 @@ public enum LyricsTime {
 
         func parseSecondsAndMillis(_ part: String) -> Int {
             guard let dotIndex = part.firstIndex(of: ".") else {
-                return (Int(part) ?? 0) * 1000
+                return scaled(Int(part) ?? 0, by: 1000)
             }
-            let seconds = (Int(part[part.startIndex..<dotIndex]) ?? 0) * 1000
+            let seconds = scaled(Int(part[part.startIndex..<dotIndex]) ?? 0, by: 1000)
             let millisPart = part[part.index(after: dotIndex)...]
 
             if millisPart.isEmpty { return seconds }
@@ -47,7 +47,7 @@ public enum LyricsTime {
             case 3: normalizedMillis = String(millisPart)
             default: normalizedMillis = String(millisPart.prefix(3))
             }
-            return seconds + (Int(normalizedMillis) ?? 0)
+            return adding(seconds, Int(normalizedMillis) ?? 0)
         }
 
         guard let firstColon = string.firstIndex(of: ":") else {
@@ -57,14 +57,44 @@ public enum LyricsTime {
         guard let lastColon = string.lastIndex(of: ":") else { return 0 }
         if firstColon == lastColon {
             // mm:ss.ms
-            let minutes = (Int(string[string.startIndex..<firstColon]) ?? 0) * 60_000
-            return minutes + parseSecondsAndMillis(String(string[string.index(after: firstColon)...]))
+            let minutes = scaled(Int(string[string.startIndex..<firstColon]) ?? 0, by: 60_000)
+            return adding(minutes, parseSecondsAndMillis(String(string[string.index(after: firstColon)...])))
         } else {
             // hh:mm:ss.ms
-            let hours = (Int(string[string.startIndex..<firstColon]) ?? 0) * 3_600_000
-            let minutes = (Int(string[string.index(after: firstColon)..<lastColon]) ?? 0) * 60_000
-            return hours + minutes + parseSecondsAndMillis(String(string[string.index(after: lastColon)...]))
+            let hours = scaled(Int(string[string.startIndex..<firstColon]) ?? 0, by: 3_600_000)
+            let minutes = scaled(Int(string[string.index(after: firstColon)..<lastColon]) ?? 0, by: 60_000)
+            return adding(adding(hours, minutes), parseSecondsAndMillis(String(string[string.index(after: lastColon)...])))
         }
+    }
+
+    // Saturate arithmetic overflow at the Int limits; invalid numeric fields still default to zero.
+    static func scaled(_ value: Int, by scale: Int) -> Int {
+        let result = value.multipliedReportingOverflow(by: scale)
+        return result.overflow ? (value >= 0 ? Int.max : Int.min) : result.partialValue
+    }
+
+    static func adding(_ lhs: Int, _ rhs: Int) -> Int {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? (rhs >= 0 ? Int.max : Int.min) : result.partialValue
+    }
+
+    static func subtracting(_ lhs: Int, _ rhs: Int) -> Int {
+        let result = lhs.subtractingReportingOverflow(rhs)
+        return result.overflow ? (rhs < 0 ? Int.max : Int.min) : result.partialValue
+    }
+
+    static func duration(start: Int, end: Int) -> Int {
+        guard end > start else { return 0 }
+        return subtracting(end, start)
+    }
+
+    static func progress(current: Int, start: Int, end: Int) -> Float {
+        if current < start { return 0 }
+        if current >= end { return 1 }
+        // Ordered differences can span UInt even when no Int can hold them.
+        let elapsed = UInt(bitPattern: current &- start)
+        let total = UInt(bitPattern: end &- start)
+        return Float(Double(elapsed) / Double(total))
     }
 
     /// 把毫秒格式化成 `mm:ss.SSS`（原库 `Int.toTimeFormattedString()`）。
@@ -99,6 +129,6 @@ public enum LyricsTime {
     /// 空串返回 true：Kotlin `all {}` 对空集合为真，这里保持同一口径（调用点是 Lyricify 的
     /// `(\d+)` 捕获组，必然非空，所以这是个只为语义对齐而存在的边界）。
     public static func isDigitsOnly(_ string: String) -> Bool {
-        string.allSatisfy { $0.isNumber }
+        string.unicodeScalars.allSatisfy { $0.properties.generalCategory == .decimalNumber }
     }
 }

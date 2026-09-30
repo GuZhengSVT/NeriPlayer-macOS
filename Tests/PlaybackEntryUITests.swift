@@ -131,9 +131,9 @@ final class PlaybackEntryUITests: XCTestCase {
 
         XCTAssertEqual(text(track: track, isPaused: false, isCoreIdle: false), "正在播放 · 夜曲 — 周杰伦")
         XCTAssertEqual(text(track: track, isPaused: true, isCoreIdle: false), "已暂停 · 夜曲 — 周杰伦")
-        // 空闲优先于暂停：自然播完/已停止时引擎会把暂停复位为 false，先看 isPaused 会误显示「正在播放」。
+        // 暂停也可能使 core-idle 为 true；不能把暂停显示成停止。
         XCTAssertEqual(text(track: track, isPaused: false, isCoreIdle: true), "已停止 · 夜曲 — 周杰伦")
-        XCTAssertEqual(text(track: track, isPaused: true, isCoreIdle: true), "已停止 · 夜曲 — 周杰伦")
+        XCTAssertEqual(text(track: track, isPaused: true, isCoreIdle: true), "已暂停 · 夜曲 — 周杰伦")
 
         let anonymous = Track(url: URL(fileURLWithPath: "/music/x.mp3"), title: "无题")
         XCTAssertEqual(text(track: anonymous, isPaused: false, isCoreIdle: false), "正在播放 · 无题 — 未知歌手")

@@ -316,6 +316,7 @@ enum PlayerStateCodec {
         var title: String
         var artist: String?
         var duration: Double?
+        var onlineSong: SongData?
     }
 
     private static let encoder = JSONEncoder()
@@ -326,10 +327,11 @@ enum PlayerStateCodec {
         let payloads = tracks.map {
             TrackPayload(
                 id: $0.id,
-                url: $0.url.absoluteString,
+                url: ($0.onlineSong?.identityURL ?? $0.url).absoluteString,
                 title: $0.title,
                 artist: $0.artist,
-                duration: $0.duration
+                duration: $0.duration,
+                onlineSong: $0.onlineSong
             )
         }
         guard let data = try? encoder.encode(payloads),
@@ -351,7 +353,8 @@ enum PlayerStateCodec {
                 url: URL(string: $0.url) ?? URL(fileURLWithPath: $0.url),
                 title: $0.title,
                 artist: $0.artist,
-                duration: $0.duration
+                duration: $0.duration,
+                onlineSong: $0.onlineSong
             )
         }
     }

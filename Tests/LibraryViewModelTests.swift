@@ -215,6 +215,49 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.errorMessage, "歌单名不能为空")
     }
 
+    func testRemovedGroupsDoNotResurrectSnapshotTracksInDetail() throws {
+        try insertRecord(title: "Alpha", artist: "Alice", album: "First")
+        let viewModel = LibraryViewModel(database: provider)
+        viewModel.load()
+        let artist = try XCTUnwrap(viewModel.artistGroups.first)
+        let album = try XCTUnwrap(viewModel.albumGroups.first)
+        let track = try XCTUnwrap(viewModel.tracks.first)
+
+        _ = try LibraryRepository(provider).deleteTrack(id: track.id)
+        viewModel.refresh()
+        XCTAssertTrue(viewModel.tracks(for: artist).isEmpty)
+        XCTAssertTrue(viewModel.tracks(for: album).isEmpty)
+    }
+
+    func testUnfavoritingLastGroupTrackClearsOpenDetailContents() throws {
+        try insertRecord(title: "Alpha", artist: "Alice", album: "First")
+        let viewModel = LibraryViewModel(database: provider)
+        viewModel.load()
+        let track = try XCTUnwrap(viewModel.tracks.first)
+        viewModel.toggleFavorite(track)
+        viewModel.onlyFavorites = true
+        let artist = try XCTUnwrap(viewModel.artistGroups.first)
+        let album = try XCTUnwrap(viewModel.albumGroups.first)
+
+        viewModel.toggleFavorite(track)
+        XCTAssertTrue(viewModel.tracks(for: artist).isEmpty)
+        XCTAssertTrue(viewModel.tracks(for: album).isEmpty)
+    }
+
+    func testRefreshClosesExternallyDeletedPlaylist() throws {
+        let playlists = PlaylistRepository(provider)
+        let playlist = try playlists.create(name: "Temporary")
+        let viewModel = LibraryViewModel(database: provider)
+        viewModel.load()
+        viewModel.openPlaylist(playlist)
+        XCTAssertEqual(viewModel.openPlaylistId, playlist.id)
+
+        try playlists.delete(id: playlist.id)
+        viewModel.refresh()
+        XCTAssertNil(viewModel.openPlaylistId)
+        XCTAssertTrue(viewModel.playlistEntries.isEmpty)
+    }
+
     // MARK: - 视图模型：导入流程
 
     /// importDirectory 在后台同步，主线程回流后 tracks 与聚合被刷新。

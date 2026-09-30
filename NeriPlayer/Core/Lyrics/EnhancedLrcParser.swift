@@ -157,7 +157,7 @@ public struct EnhancedLrcParser: LyricsParser {
         if !timestamps.isEmpty {
             for startTime in timestamps {
                 if !mainSyllables.isEmpty {
-                    let offset = isRelative ? startTime : startTime - firstTimestamp
+                    let offset = isRelative ? startTime : LyricsTime.subtracting(startTime, firstTimestamp)
                     let shifted = shiftedSyllables(mainSyllables, by: offset)
                     results.append(.main(MainKaraokeLine(
                         syllables: shifted,
@@ -178,7 +178,7 @@ public struct EnhancedLrcParser: LyricsParser {
                 }
 
                 if !bgSyllables.isEmpty {
-                    let bgOffset = bgIsRelative ? startTime : startTime - firstTimestamp
+                    let bgOffset = bgIsRelative ? startTime : LyricsTime.subtracting(startTime, firstTimestamp)
                     let shifted = shiftedSyllables(bgSyllables, by: bgOffset)
                     results.append(.accompaniment(AccompanimentKaraokeLine(
                         syllables: shifted,
@@ -340,8 +340,8 @@ public struct EnhancedLrcParser: LyricsParser {
         syllables.map {
             KaraokeSyllable(
                 content: $0.content,
-                start: $0.start + offset,
-                end: $0.end + offset,
+                start: LyricsTime.adding($0.start, offset),
+                end: LyricsTime.adding($0.end, offset),
                 phonetic: $0.phonetic
             )
         }

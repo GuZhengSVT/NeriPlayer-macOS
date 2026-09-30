@@ -9,7 +9,7 @@
 //      语义上不安全（可能被复制语义掩盖、也不利于在退出钩子里取回同一实例）。
 //   3) AppState 已经在启动路径上（.task 里调 detectSafeMode），顺序天然是
 //      「先探测崩溃 → 再启动播放集成」，不需要额外的启动协调代码。
-// 安全模式逻辑保持原样：detectSafeMode 与 CrashState 读取都不做改动；
+// 安全模式读取启动时的异常记录；正常退出后消费，保留诊断文件；
 // 播放集成无条件启动（M1 尚无「安全模式下要禁用的功能」，见 M1-T6 报告遗留问题）。
 //
 // M3-T2：统计写入管道。startPlaybackStats 在播放集成之后启动，订阅 PlaybackStateStore 的
@@ -30,6 +30,14 @@ public final class AppState: ObservableObject {
     @Published public private(set) var playbackStore: PlaybackStateStore?
     /// 媒体键与 Now Playing 控制器（M1-T6）。仅随 playbackStore 一起存在。
     private var nowPlaying: NowPlayingController?
+    /// M4: one lyrics adapter shared across windows and navigation.
+    @Published private(set) var lyricsViewModel: LyricsViewModel?
+    @Published private(set) var onlineViewModel: OnlineViewModel?
+    @Published private(set) var onlinePlayback: OnlinePlaybackCoordinator?
+    private var playbackCache: PlaybackAudioCache?
+    @Published private(set) var downloadViewModel: DownloadViewModel?
+    private var downloadManager: DownloadManager?
+    private var downloadStorage: DownloadStorage?
     /// 媒体库视图模型（M2-T5）。启动时打开数据库后创建；打开失败时为 nil。
     @Published private(set) var libraryViewModel: LibraryViewModel?
     /// 设置页视图模型（M3-T5）。只依赖设置存储，启动时必定创建成功。
@@ -49,12 +57,28 @@ public final class AppState: ObservableObject {
     private var sessionDatabase: DatabaseProvider?
     /// 设置存储（M3-T3 起用于读取「启动是否自动续播」）。
     private let settings: SettingsStore
-    /// 应用退出通知观察者；stopPlaybackIntegration 时注销。
+    private let crashReporter: CrashReporter
+    private var startupCrashReport: CrashReport?
+    /// 转发子模型的变化，让根窗口的主题和强调色立即更新。
+    private var settingsObservation: AnyCancellable?
+    /// 应用退出通知观察者；随 AppState 生命周期注销。
     private var terminateObserver: NSObjectProtocol?
 
-    public init(isSafeMode: Bool = false, settings: SettingsStore = .shared) {
+    public init(
+        isSafeMode: Bool = false,
+        settings: SettingsStore = .shared,
+        crashReporter: CrashReporter = .shared
+    ) {
         self.isSafeMode = isSafeMode
         self.settings = settings
+        self.crashReporter = crashReporter
+        // 即使播放引擎启动失败，也必须执行应用级退出清理。
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.stopPlaybackIntegration()
+            self?.acknowledgeStartupCrash()
+        }
     }
 
     deinit {
@@ -75,10 +99,18 @@ public final class AppState: ObservableObject {
     /// 启动探测：若存在待处理崩溃记录则进入安全模式。
     @discardableResult
     public func detectSafeMode() -> Bool {
-        guard CrashState.isSafeModeRequired else { return false }
+        guard crashReporter.hasPendingCrashReport() else { return false }
+        startupCrashReport = crashReporter.loadReport()
         isSafeMode = true
         Log.error("pending crash report detected; entering safe mode", to: Log.ui)
         return true
+    }
+
+    /// 只在正常退出时消费本次启动时看到的记录，不吞掉本次运行中新产生的异常。
+    func acknowledgeStartupCrash() {
+        guard let startupCrashReport, crashReporter.loadReport() == startupCrashReport else { return }
+        crashReporter.markCrashHandled()
+        self.startupCrashReport = nil
     }
 
     // MARK: - 播放集成（M1-T6）
@@ -110,13 +142,6 @@ public final class AppState: ObservableObject {
             let store = try PlaybackStateStore()
             playbackStore = store
             nowPlaying = NowPlayingController().attach(to: store)
-            terminateObserver = NotificationCenter.default.addObserver(
-                forName: NSApplication.willTerminateNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                self?.stopPlaybackIntegration()
-            }
             Log.player.info("播放集成已启动：媒体键与 Now Playing 已接入")
         } catch {
             Log.player.error("播放集成启动失败（媒体键与 Now Playing 不可用）：\(error.localizedDescription)")
@@ -138,13 +163,28 @@ public final class AppState: ObservableObject {
         playbackStats = nil
         statsDatabase = nil
 
+        if let model = onlineViewModel {
+            onlineViewModel = nil
+            Task { @MainActor in model.stop() }
+        }
+        if let coordinator = onlinePlayback {
+            onlinePlayback = nil
+            Task { @MainActor in coordinator.stop() }
+        }
+        playbackCache = nil
+        if let manager = downloadManager {
+            downloadManager = nil
+            downloadViewModel = nil
+            Task { try? await manager.stop() }
+        }
+        downloadStorage = nil
+        if let lyrics = lyricsViewModel {
+            lyricsViewModel = nil
+            Task { @MainActor in lyrics.stop() }
+        }
         guard let store = playbackStore, let nowPlaying else { return }
         nowPlaying.stop()
         store.stop()
-        if let terminateObserver {
-            NotificationCenter.default.removeObserver(terminateObserver)
-        }
-        terminateObserver = nil
         self.nowPlaying = nil
         playbackStore = nil
         Log.player.info("播放集成已清理：媒体键命令已注销，Now Playing 已清空")
@@ -218,6 +258,66 @@ public final class AppState: ObservableObject {
         return settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
     }
 
+    // MARK: - Online sources (M5)
+
+    @MainActor
+    func startOnlineSources() {
+        guard onlineViewModel == nil else { return }
+        let sessions = OnlineSessionStore.shared
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("NeriPlayer/YouTubeMusic/bootstrap.json")
+        let clients: [any OnlineMusicClient] = [NeteaseClient(sessions: sessions), BilibiliClient(sessions: sessions),
+                                                YouTubeMusicClient(sessionStore: sessions, cacheURL: cache)]
+        let manager = OnlineSearchManager(clients: clients)
+        if let store = playbackStore {
+            do {
+                if playbackCache == nil {
+                    let storage = try DownloadStorage.standard()
+                    playbackCache = try PlaybackAudioCache(root: storage.cacheRoot.appendingPathComponent("Playback", isDirectory: true))
+                }
+                store.setPlaybackCache(playbackCache)
+            } catch { Log.net.error("播放缓存初始化失败：\(error.localizedDescription)") }
+            onlinePlayback = OnlinePlaybackCoordinator(store: store, resolver: PlaybackResolver(clients: clients), searchManager: manager, cache: playbackCache)
+        }
+        onlineViewModel = OnlineViewModel(clients: clients, sessions: sessions, store: playbackStore)
+    }
+
+    // MARK: - Downloads (M6)
+
+    @MainActor
+    func startDownloads() {
+        guard downloadViewModel == nil else { return }
+        do {
+            let storage = try DownloadStorage.standard()
+            let cache: PlaybackAudioCache
+            if let existing = playbackCache {
+                cache = existing
+            } else {
+                cache = try PlaybackAudioCache(root: storage.cacheRoot.appendingPathComponent("Playback", isDirectory: true))
+                playbackCache = cache
+            }
+            playbackStore?.setPlaybackCache(cache)
+            let clients = [NeteaseClient(sessions: .shared), BilibiliClient(sessions: .shared),
+                           YouTubeMusicClient(sessionStore: .shared, cacheURL: nil)] as [any OnlineMusicClient]
+            let resolver = DownloadResolver(clients: clients)
+            let manager = try DownloadManager(storage: storage, resolve: { song in try await resolver.resolve(song) })
+            downloadStorage = storage; downloadManager = manager
+            downloadViewModel = DownloadViewModel(manager: manager, storage: storage, cache: cache)
+        } catch { Log.net.error("下载服务初始化失败：\(error.localizedDescription)") }
+    }
+
+    @MainActor
+    func enqueueDownload(_ song: SongData) { downloadViewModel?.enqueue(song) }
+
+    // MARK: - 歌词（M4）
+
+    @MainActor
+    func startLyrics() {
+        guard let store = playbackStore else { return }
+        if lyricsViewModel == nil { lyricsViewModel = LyricsViewModel(settings: settings) }
+        lyricsViewModel?.attach(to: store)
+    }
+
     // MARK: - 设置（M3-T5）
 
     /// 创建设置页视图模型。幂等。
@@ -228,12 +328,16 @@ public final class AppState: ObservableObject {
     @MainActor
     public func startSettings() {
         guard settingsViewModel == nil else { return }
-        settingsViewModel = SettingsViewModel(
+        let viewModel = SettingsViewModel(
             settings: settings,
             rescanHandler: { [weak self] url in
                 self?.libraryViewModel?.importDirectory(url)
             }
         )
+        settingsViewModel = viewModel
+        settingsObservation = viewModel.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         applyDefaultVolume()
     }
 
