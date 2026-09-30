@@ -35,8 +35,11 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
 
     /// M1-T2 的 libmpv 封装；本类只通过其公开 API 访问内核。
     private let controller: MPVController
-    /// 四条属性流的消费任务，deinit 时取消。
-    private var observerTasks: [Task<Void, Never>] = []
+    /// 四条属性的同步订阅令牌，deinit 时取消。
+    private var propertyObservations: [any MPVPropertyObservation] = []
+    /// 同步状态观察者（M3 收尾修复）：状态一变就在事件线程上直接通知订阅者，
+    /// 不经过协作线程池调度。见 PlayerEngineObservation.swift 的说明。
+    private let stateBroadcaster = PlayerEngineStateBroadcaster()
 
     /// 创建引擎并开始桥接内核属性。
     /// - Parameters:
@@ -48,10 +51,11 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     }
 
     deinit {
-        // 先停订阅任务，再结束对外流，避免状态在销毁过程中继续广播。
-        for task in observerTasks {
-            task.cancel()
+        // 先停同步订阅，再结束对外流，避免状态在销毁过程中继续广播。
+        for observation in propertyObservations {
+            observation.cancel()
         }
+        propertyObservations.removeAll()
         lock.lock()
         let listeners = Array(continuations.values)
         continuations.removeAll()
@@ -143,20 +147,28 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
         }
     }
 
+    /// 同步注册状态观察者（见 PlayerEngine.addStateObserver 的说明）。
+    public func addStateObserver(
+        _ handler: @escaping @Sendable (PlayerEngineState) -> Void
+    ) -> any PlayerEngineStateObservation {
+        stateBroadcaster.add(handler)
+    }
+
     // MARK: - 属性桥接
 
     /// 订阅四条内核属性，把变更折叠进状态快照。
+    ///
+    /// 用同步订阅（addPropertyObserver）而不是消费属性流：属性流要等一个消费任务被调度才会
+    /// 把变更交到这里，实测在调度不利时这一步会拖很久，导致引擎状态迟迟不更新，
+    /// 连带把内存态、界面文案与现场落库一起拖住。同步订阅在 mpv 事件线程上直接回调，
+    /// 折叠时序与原先完全一致（仍按事件到达顺序逐条 apply），变的是「谁来驱动」。
     private func startObserving() {
         let properties: [MPVProperty] = [.timePosition, .duration, .paused, .coreIdle]
         for property in properties {
-            let stream = controller.observe(property, bufferingNewest: 64)
-            let task = Task { [weak self] in
-                for await change in stream {
-                    guard let self else { return }
-                    self.apply(change)
-                }
+            let observation = controller.addPropertyObserver(property) { [weak self] change in
+                self?.apply(change)
             }
-            observerTasks.append(task)
+            propertyObservations.append(observation)
         }
     }
 
@@ -188,6 +200,8 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     }
 
     /// 原地修改状态；仅在快照真的变化时向订阅者广播（锁外 yield）。
+    ///
+    /// 两条通知路径都走这里，保证语义一致：同步观察者与异步流拿到的是**同一份**状态序列。
     private func mutate(_ body: (inout PlayerEngineState) -> Void) {
         lock.lock()
         var next = stateValue
@@ -199,6 +213,8 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
         stateValue = next
         let listeners = Array(continuations.values)
         lock.unlock()
+        // 先同步广播，再 yield 到流：同步路径是「必须及时」的那条，优先送达。
+        stateBroadcaster.broadcast(next)
         for listener in listeners {
             listener.yield(next)
         }

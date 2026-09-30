@@ -177,7 +177,20 @@ final class MPVEventLoop: @unchecked Sendable {
     private let lock = NSLock()
     private var stopRequested = false
     private var tornDown = false
-    private var observers: [UInt64: AsyncStream<MPVPropertyChange>.Continuation] = [:]
+    /// 一次属性订阅的接收端。同一个 token 只会是下面两种形态之一：
+    /// 流式（`observe` 的消费者）或同步 handler（`addPropertyObserver`）。
+    ///
+    /// 为什么要有 handler 形态：流式投递依赖消费者任务被调度，实测在调度不利时属性事件会
+    /// 迟迟不落地，把「引擎状态 → 内存态」整条链路拖住。需要确定性送达的消费者应当用
+    /// handler 形态 —— 它在 mpv 事件线程上被直接调用。
+    struct PropertySubscription {
+        /// 流式接收端。handler 型订阅为 nil。
+        var continuation: AsyncStream<MPVPropertyChange>.Continuation?
+        /// 同步接收端，按注册顺序投递（有序数组而不是字典：多订阅者时顺序必须确定）。
+        var handlers: [(id: UUID, handler: @Sendable (MPVPropertyChange) -> Void)]
+    }
+
+    private var observers: [UInt64: PropertySubscription] = [:]
     private var nextObserverToken: UInt64 = 1
 
     /// 用已初始化的句柄构造引擎；队列名与 MPVController 对外声明的一致，便于采样辨认。
@@ -221,9 +234,14 @@ final class MPVEventLoop: @unchecked Sendable {
             let change = Self.makeChange(
                 property: raw.assumingMemoryBound(to: mpv_event_property.self).pointee
             )
-            // 先取出 continuation（短暂持锁），再在锁外 yield，
+            // 先取出订阅（短暂持锁），再在锁外投递，
             // 避免消费者侧 onTermination 回调与事件线程争同一把锁。
-            observer(for: event.reply_userdata)?.yield(change)
+            guard let subscription = observer(for: event.reply_userdata) else { break }
+            subscription.continuation?.yield(change)
+            // 同步 handler 在事件线程上直接调用：这条路径不经过调度，属性一变就落地。
+            for entry in subscription.handlers {
+                entry.handler(change)
+            }
         case MPV_EVENT_LOG_MESSAGE:
             log(event: event)
         default:
@@ -275,7 +293,7 @@ final class MPVEventLoop: @unchecked Sendable {
         return stopRequested
     }
 
-    private func observer(for token: UInt64) -> AsyncStream<MPVPropertyChange>.Continuation? {
+    private func observer(for token: UInt64) -> PropertySubscription? {
         lock.lock()
         defer { lock.unlock() }
         return observers[token]
@@ -284,11 +302,11 @@ final class MPVEventLoop: @unchecked Sendable {
     /// 结束所有订阅流并清空订阅表（先快照再在锁外 finish，避免重入同一把锁）。
     private func finishAllObservers() {
         lock.lock()
-        let continuations = Array(observers.values)
+        let subscriptions = Array(observers.values)
         observers.removeAll()
         lock.unlock()
-        for continuation in continuations {
-            continuation.finish()
+        for subscription in subscriptions {
+            subscription.continuation?.finish()
         }
     }
 
@@ -398,10 +416,50 @@ final class MPVEventLoop: @unchecked Sendable {
         bufferingNewest: Int
     ) -> AsyncStream<MPVPropertyChange> {
         AsyncStream(bufferingPolicy: .bufferingNewest(bufferingNewest)) { continuation in
-            let token = registerObserver(name: propertyName, format: format, continuation: continuation)
+            let token = registerObserver(
+                name: propertyName,
+                format: format,
+                subscription: PropertySubscription(continuation: continuation, handlers: [])
+            )
             continuation.onTermination = { [weak self] _ in
                 self?.unregisterObserver(token: token)
             }
+        }
+    }
+
+    /// 建立一次同步订阅：handler 在 mpv 事件线程上被直接调用。
+    ///
+    /// 与 `observe` 的区别就是「谁来驱动投递」：本方法不经过协作线程池，
+    /// 属性一变就回调，因此适合「必须及时反映」的消费者（如 MPVEngine 的状态折叠）。
+    func addPropertyObserver(
+        _ propertyName: String,
+        format: MPVFormat,
+        handler: @escaping @Sendable (MPVPropertyChange) -> Void
+    ) -> any MPVPropertyObservation {
+        let handlerID = UUID()
+        let token = registerObserver(
+            name: propertyName,
+            format: format,
+            subscription: PropertySubscription(continuation: nil, handlers: [(id: handlerID, handler: handler)])
+        )
+        return MPVPropertyToken { [weak self] in
+            self?.removeHandler(token: token, handlerID: handlerID)
+        }
+    }
+
+    /// 注销某个同步 handler；该 token 已无接收端时顺便 unobserve。
+    private func removeHandler(token: UInt64, handlerID: UUID) {
+        lock.lock()
+        let before = observers[token]?.handlers.count ?? 0
+        observers[token]?.handlers.removeAll { $0.id == handlerID }
+        let hadHandler = (observers[token]?.handlers.count ?? 0) != before
+        let empty = observers[token].map { $0.continuation == nil && $0.handlers.isEmpty } ?? false
+        if empty { observers.removeValue(forKey: token) }
+        lock.unlock()
+        guard hadHandler, empty, !isTornDown() else { return }
+        let removed = mpv_unobserve_property(handle, token)
+        if removed < 0 {
+            Log.player.error("mpv_unobserve_property 失败：token=\(token) code=\(removed)")
         }
     }
 
@@ -410,25 +468,25 @@ final class MPVEventLoop: @unchecked Sendable {
     private func registerObserver(
         name: String,
         format: MPVFormat,
-        continuation: AsyncStream<MPVPropertyChange>.Continuation
+        subscription: PropertySubscription
     ) -> UInt64 {
         lock.lock()
         let token = nextObserverToken
         nextObserverToken &+= 1
         let usable = !tornDown
-        observers[token] = continuation
+        observers[token] = subscription
         lock.unlock()
 
         guard usable else {
             removeObserver(token: token)
-            continuation.finish()
+            subscription.continuation?.finish()
             return token
         }
 
         let status = name.withCString { mpv_observe_property(handle, token, $0, format.mpvFormat) }
         if status < 0 {
             removeObserver(token: token)
-            continuation.finish()
+            subscription.continuation?.finish()
             Log.player.error("mpv_observe_property 失败：name=\(name) code=\(status)")
         }
         return token
@@ -705,6 +763,17 @@ public final class MPVController: @unchecked Sendable {
     /// 流终止（消费者取消或控制器销毁）时自动 mpv_unobserve_property。
     public func observe(_ property: MPVProperty, bufferingNewest: Int = 64) -> AsyncStream<MPVPropertyChange> {
         observe(property.rawValue, format: property.format, bufferingNewest: bufferingNewest)
+    }
+
+    /// 同步订阅一个已知属性（M3 收尾修复）：变更在 mpv 事件线程上直接回调。
+    ///
+    /// 与 `observe(_:bufferingNewest:)` 的分工：本方法不依赖消费者任务被调度，
+    /// 适合「属性一变就必须反映」的路径；流保留给需要拉取语义或额外订阅者的场景。
+    public func addPropertyObserver(
+        _ property: MPVProperty,
+        _ handler: @escaping @Sendable (MPVPropertyChange) -> Void
+    ) -> any MPVPropertyObservation {
+        engine.addPropertyObserver(property.rawValue, format: property.format, handler: handler)
     }
 
     /// 订阅任意属性名（原始字符串），用于 MPVProperty 未列出的属性。

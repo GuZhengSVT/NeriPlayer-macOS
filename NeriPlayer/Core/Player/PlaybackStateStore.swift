@@ -95,12 +95,19 @@ public final class PlaybackStateStore: @unchecked Sendable {
     private var playbackArmed = false
     /// 是否应保持「引擎与队列当前曲一致」。stop() 置 false，任何播放命令置 true。
     private var shouldPlayCurrent = false
-    /// 引擎最后一次发布的状态快照。快照里的引擎侧字段一律取自这里，而不是实时回读引擎 ——
-    /// 这样「内存态」严格是事件流的折叠结果，与 EOF 闩锁同源，不会出现「快照已显示在播、
+    /// 引擎最后一次折叠进来的状态快照。快照里的引擎侧字段一律取自这里，而不是实时回读引擎 ——
+    /// 这样「内存态」严格是同一份事件序列的折叠结果，与 EOF 闩锁同源，不会出现「快照已显示在播、
     /// 但闩锁还没武装」的错位窗口（实时回读会因队列回调先于引擎回调而制造该窗口）。
+    ///
+    /// M3 收尾修复：这份状态由**引擎同步回调**折叠（见 startObserving），不再由一个消费
+    /// AsyncStream 的非结构化 Task 驱动 —— 后者在调度不利时会长时间不被唤醒，导致内存态
+    /// 停在旧值（界面文案、媒体键、现场落库一起卡住）。折叠时序的语义没有变，变的只是
+    /// 「谁来驱动」：从「等任务被调度」变成「状态产生方直接调用」。
     private var engineState: PlayerEngineState
-    /// 引擎/队列状态流的消费任务，deinit 时取消。
+    /// 队列状态流的消费任务，deinit 时取消。
     private var observerTasks: [Task<Void, Never>] = []
+    /// 引擎状态的同步订阅令牌，deinit 时取消。
+    private var engineObservation: (any PlayerEngineStateObservation)?
     /// 待应用的恢复进度（移植规划 M3-T3）。见 `restore(_:resumePlayback:)`。
     private var pendingRestore: PendingRestore?
 
@@ -140,10 +147,12 @@ public final class PlaybackStateStore: @unchecked Sendable {
     }
 
     deinit {
-        // 先停订阅任务，再结束对外流，避免状态在销毁过程中继续广播。
+        // 先停订阅（任务与同步观察者），再结束对外流，避免状态在销毁过程中继续广播。
         for task in observerTasks {
             task.cancel()
         }
+        engineObservation?.cancel()
+        engineObservation = nil
         lock.lock()
         let listeners = Array(continuations.values)
         continuations.removeAll()
@@ -391,22 +400,18 @@ public final class PlaybackStateStore: @unchecked Sendable {
 
     // MARK: - 桥接：状态订阅
 
-    /// 订阅引擎与队列两条状态流：引擎流驱动 EOF 判定，队列流驱动快照刷新。
+    /// 订阅引擎与队列两条状态来源：引擎状态用**同步回调**折叠，队列状态用流刷新。
     ///
-    /// 为什么显式指定 .userInitiated（而不是让 Task 继承创建上下文的优先级）：
-    /// 这两条流是播放状态的唯一折叠路径 —— 界面文案、媒体键、Now Playing、播放现场落库
-    /// 都要等它推进。若不指定，任务会继承调用方的优先级，在调用方是后台/低优先级上下文时
-    /// 被系统排到后面；实测在 CPU 竞争下会出现「引擎事件已经产生、快照却长时间停在旧值」，
-    /// 表现为播放状态卡住（测试里就是各种等待快照超时）。用户可见的播放状态不该被无关的
-    /// 后台工作饿死，所以给它一个明确的、面向交互的优先级。
+    /// 为什么两条来源用不同机制：
+    ///   - 引擎状态是内存态的主要输入（在播/暂停/进度/空闲），必须确定性送达，
+    ///     所以用 `addStateObserver` —— 由产生状态的那段代码在自己的线程上直接调用，
+    ///     不经过协作线程池调度（原先用 Task 消费流，实测在调度不利时会长时间不推进）；
+    ///   - 队列的每条命令路径（enqueue / next / setMode / restore …）在改完状态后都已经
+    ///     同步调用过 `publish()`，这条流只是「万一有遗漏」的兜底刷新，晚一点不影响正确性。
     private func startObserving() {
-        let engineStream = engine.observeState()
-        observerTasks.append(Task(priority: .userInitiated) { [weak self] in
-            for await state in engineStream {
-                guard let self else { return }
-                handleEngineState(state)
-            }
-        })
+        engineObservation = engine.addStateObserver { [weak self] state in
+            self?.handleEngineState(state)
+        }
         let queueStream = queue.observeState()
         observerTasks.append(Task(priority: .userInitiated) { [weak self] in
             for await _ in queueStream {

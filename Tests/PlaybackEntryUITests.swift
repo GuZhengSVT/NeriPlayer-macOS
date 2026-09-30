@@ -342,6 +342,8 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
     private let lock = NSLock()
     private var stateValue: PlayerEngineState = .idle
     private var continuations: [UUID: AsyncStream<PlayerEngineState>.Continuation] = [:]
+    /// 同步状态观察者的广播器。
+    private let stateBroadcaster = PlayerEngineStateBroadcaster()
 
     var currentURL: URL? { snapshot.currentURL }
     var isPaused: Bool { snapshot.isPaused }
@@ -381,6 +383,13 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
 
     func setVolume(_ volume: Double) throws {}
 
+    /// 同步状态观察者（与生产实现同一套语义，见 PlayerEngineObservation.swift）。
+    func addStateObserver(
+        _ handler: @escaping @Sendable (PlayerEngineState) -> Void
+    ) -> any PlayerEngineStateObservation {
+        stateBroadcaster.add(handler)
+    }
+
     func observeState() -> AsyncStream<PlayerEngineState> {
         // unbounded：状态条测试要看到每一次快照变化（含「播放中 → 暂停」），
         // bufferingNewest(1) 在高负载下会合并掉中间事件（与 PlaybackStateStoreTests 同因）。
@@ -416,6 +425,8 @@ private final class FakeEngine: PlayerEngine, @unchecked Sendable {
         stateValue = next
         let listeners = Array(continuations.values)
         lock.unlock()
+        // 与 MPVEngine 同序：先同步广播（必须及时的那条），再 yield 到流。
+        stateBroadcaster.broadcast(next)
         for listener in listeners {
             listener.yield(next)
         }

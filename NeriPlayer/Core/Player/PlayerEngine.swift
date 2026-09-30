@@ -122,7 +122,23 @@ public protocol PlayerEngine: AnyObject, Sendable {
 
     /// 订阅状态变更。每次订阅返回一条独立的新流；消费端取消任务时流终止。
     /// 流内容为全量快照，且只在快照真正发生变化时产出。
+    ///
+    /// 注意这条流的**送达时机取决于消费者任务是否被调度**，因此不适合承担「必须及时反映
+    /// 引擎状态」的职责（实测在调度不利时会长时间不推进）。需要确定性送达的场景请用
+    /// `addStateObserver(_:)`。
     func observeState() -> AsyncStream<PlayerEngineState>
+
+    /// 注册状态变更回调：引擎在状态变化时于**自己的执行上下文里同步调用**。
+    ///
+    /// 与 `observeState()` 的分工：本方法是「推送、由状态产生方驱动」，不经过协作线程池调度，
+    /// 因此内存态聚合、界面文案、媒体键与现场落库这类「引擎一变就得跟着变」的路径应当用它；
+    /// 流保留给需要拉取语义或额外订阅者的场景。
+    ///
+    /// - Parameter handler: 在广播线程上同步调用；实现须自行保证线程安全，且不要在里面长时间阻塞。
+    /// - Returns: 取消令牌；调用 `cancel()` 即注销。
+    func addStateObserver(
+        _ handler: @escaping @Sendable (PlayerEngineState) -> Void
+    ) -> any PlayerEngineStateObservation
 }
 
 public extension PlayerEngine {
