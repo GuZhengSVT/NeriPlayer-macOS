@@ -1,6 +1,6 @@
 # M4 歌词系统 —— 移植工作笔记
 
-> 状态：**M4-T1 进行中**（契约/模型层已落地并有单测；解析器移植并行进行）。
+> 状态：**M4-T1 已完成**（契约/模型层 + 全部解析器 + 导出器，149 条单测，全量 499 条全绿）。
 > 参考实现：`/Volumes/taurus/Document/Code/NeriPlayer/np-submodule/accompanist-lyrics-core`
 > （Kotlin Multiplatform，`src/commonMain` 共约 2156 行，纯逻辑、无平台依赖，可逐文件平移）
 

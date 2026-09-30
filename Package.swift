@@ -94,6 +94,10 @@ let testTarget: Target = .testTarget(
     // Tools/generate-audio-fixtures.sh。
     resources: [
         .copy("Fixtures/Audio"),
+        // M4-T1：歌词解析的 golden 素材。KRC 的那份样例约 28KB，
+        // 原库在 KugouParserTest 与 AutoParserTest 里各内嵌了一份，这里收成一份共享
+        // fixture，测试用 Bundle.module 取（bundle 内的目录名是 "Lyrics"）。
+        .copy("Fixtures/Lyrics"),
     ],
     swiftSettings: [
         .unsafeFlags(["-Xcc", "-I" + vendorMpvIncludeDir]),

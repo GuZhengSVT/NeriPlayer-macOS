@@ -23,40 +23,40 @@ final class PlayerEngineObservationTests: XCTestCase {
     /// 广播是同步的：broadcast 返回时 handler 已经跑完。
     func testBroadcasterDeliversSynchronously() {
         let broadcaster = PlayerEngineStateBroadcaster()
-        var received: [PlayerEngineState] = []
-        _ = broadcaster.add { received.append($0) }
+        let received = SyncBox<[PlayerEngineState]>([])
+        _ = broadcaster.add { received.value.append($0) }
 
         broadcaster.broadcast(.idle)
 
-        XCTAssertEqual(received, [.idle], "broadcast 返回时 handler 应已执行完")
+        XCTAssertEqual(received.value, [.idle], "broadcast 返回时 handler 应已执行完")
         XCTAssertEqual(broadcaster.observerCount, 1)
     }
 
     /// 多个观察者都收到，且顺序与注册顺序一致。
     func testBroadcasterDeliversToAllObserversInRegistrationOrder() {
         let broadcaster = PlayerEngineStateBroadcaster()
-        var order: [String] = []
-        _ = broadcaster.add { _ in order.append("first") }
-        _ = broadcaster.add { _ in order.append("second") }
+        let order = SyncBox<[String]>([])
+        _ = broadcaster.add { _ in order.value.append("first") }
+        _ = broadcaster.add { _ in order.value.append("second") }
 
         broadcaster.broadcast(.idle)
 
-        XCTAssertEqual(order, ["first", "second"])
+        XCTAssertEqual(order.value, ["first", "second"])
         XCTAssertEqual(broadcaster.observerCount, 2)
     }
 
     /// 取消后不再收到；重复取消是安全的。
     func testCancelStopsDeliveryAndIsIdempotent() {
         let broadcaster = PlayerEngineStateBroadcaster()
-        var count = 0
-        let token = broadcaster.add { _ in count += 1 }
+        let count = SyncBox(0)
+        let token = broadcaster.add { _ in count.value += 1 }
 
         broadcaster.broadcast(.idle)
         token.cancel()
         token.cancel()
         broadcaster.broadcast(.idle)
 
-        XCTAssertEqual(count, 1)
+        XCTAssertEqual(count.value, 1)
         XCTAssertEqual(broadcaster.observerCount, 0)
     }
 
@@ -67,29 +67,29 @@ final class PlayerEngineObservationTests: XCTestCase {
     /// 由持有者生命周期兜底，代价小得多。
     func testTokenDeallocDoesNotUnsubscribe() {
         let broadcaster = PlayerEngineStateBroadcaster()
-        var received = 0
-        var token: (any PlayerEngineStateObservation)? = broadcaster.add { _ in received += 1 }
+        let received = SyncBox(0)
+        var token: (any PlayerEngineStateObservation)? = broadcaster.add { _ in received.value += 1 }
         XCTAssertEqual(broadcaster.observerCount, 1)
 
         token = nil
         broadcaster.broadcast(.idle)
 
         XCTAssertEqual(broadcaster.observerCount, 1, "令牌释放不该注销订阅")
-        XCTAssertEqual(received, 1, "订阅仍然有效")
+        XCTAssertEqual(received.value, 1, "订阅仍然有效")
     }
 
     /// 观察者在广播过程中注销自己（或再注册一个）不会死锁、也不影响本次广播的其他观察者。
     /// 这正是「先取快照、再在锁外遍历」这条实现约定的用途。
     func testObserverCancellingItselfDuringBroadcastIsSafe() {
         let broadcaster = PlayerEngineStateBroadcaster()
-        var token: (any PlayerEngineStateObservation)?
-        var others = 0
-        token = broadcaster.add { _ in token?.cancel() }
-        _ = broadcaster.add { _ in others += 1 }
+        let token = SyncBox<(any PlayerEngineStateObservation)?>(nil)
+        let others = SyncBox(0)
+        token.value = broadcaster.add { _ in token.value?.cancel() }
+        _ = broadcaster.add { _ in others.value += 1 }
 
         broadcaster.broadcast(.idle)
 
-        XCTAssertEqual(others, 1, "另一个观察者不该被自注销影响")
+        XCTAssertEqual(others.value, 1, "另一个观察者不该被自注销影响")
         XCTAssertEqual(broadcaster.observerCount, 1)
     }
 
@@ -144,10 +144,11 @@ final class PlayerEngineObservationTests: XCTestCase {
     /// 释放 store 后，引擎侧的订阅必须被注销，不能再回调到已销毁的对象上。
     func testStoreCancelsEngineObservationOnDeinit() {
         let engine = SynchronousFakeEngine()
-        var store: PlaybackStateStore? = PlaybackStateStore(engine: engine)
-        XCTAssertEqual(engine.observerCount, 1)
-
-        store = nil
+        do {
+            let store = PlaybackStateStore(engine: engine)
+            XCTAssertEqual(engine.observerCount, 1)
+            withExtendedLifetime(store) {}
+        }
 
         XCTAssertEqual(engine.observerCount, 0, "store 释放后应注销引擎订阅")
     }
@@ -316,5 +317,31 @@ private final class SynchronousFakeEngine: PlayerEngine, @unchecked Sendable {
         lock.lock()
         continuations.removeValue(forKey: id)
         lock.unlock()
+    }
+}
+
+/// 观察者回调是 `@Sendable` 的，而这些用例需要计数/持有令牌，免不了可变状态。
+/// 由于本文件守的正是「回调是同步发生的」，这里用一个加锁盒子显式表达「我知道它被同步调用」，
+/// 免得在并发代码里直接改写捕获的 `var`（Swift 6 语言模式下会直接报错）。
+private final class SyncBox<Value>: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        storage = value
+    }
+
+    var value: Value {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            storage = newValue
+        }
     }
 }
