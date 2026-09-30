@@ -168,38 +168,28 @@ final class PlaybackEntryUITests: XCTestCase {
         XCTAssertNil(reader.lastText, "订阅时队列为空，不该有状态文案")
 
         store.playTrack(track)
-        // 先轮询 store 快照确认状态落地（直接读，不经流），再等状态条文案：
-        // 文案依赖 store 内部消费任务异步发布，直接等文案在极端负载下会与
-        // 出站流的 newest-1 缓冲竞争（实测偶发 20s 内只见「已停止」）。
-        try await waitForSnapshot(store) { $0.currentTrack?.id == track.id && !$0.isCoreIdle }
-        try await reader.waitForText("正在播放 · 夜曲0 — 夜曲")
-
-        store.togglePlayPause()
-        try await waitForSnapshot(store) { $0.isPaused }
-        try await reader.waitForText("已暂停 · 夜曲0 — 夜曲")
-
-        store.togglePlayPause()
-        try await waitForSnapshot(store) { !$0.isPaused }
-        try await reader.waitForText("正在播放 · 夜曲0 — 夜曲")
-
-        // 只有位置变化时文案不变：等待这次 seek 的快照落地，文案仍是刚才那条。
-        let countBeforeSeek = reader.count
-        store.seek(to: 12)
-        try await reader.waitForCount(countBeforeSeek + 1)
-        XCTAssertEqual(reader.lastText, "正在播放 · 夜曲0 — 夜曲")
-    }
-
-    private func waitForSnapshot(
-        _ store: PlaybackStateStore,
-        seconds: Double = 20,
-        until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
-    ) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if predicate(store.snapshot) { return }
-            try await Task.sleep(nanoseconds: 10_000_000)
+        var snapshot = try await waitCaughtUp(reader, store) {
+            $0.currentTrack?.id == track.id && !$0.isCoreIdle
         }
-        throw PlaybackEntryTestError.waitTimeout(expected: "snapshot condition", observed: [])
+        XCTAssertEqual(PlaybackStatusText.text(for: snapshot), "正在播放 · 夜曲0 — 夜曲")
+        XCTAssertEqual(reader.lastText, "正在播放 · 夜曲0 — 夜曲", "状态条应显示 store 的当前状态")
+
+        store.togglePlayPause()
+        snapshot = try await waitCaughtUp(reader, store) { $0.isPaused }
+        XCTAssertEqual(PlaybackStatusText.text(for: snapshot), "已暂停 · 夜曲0 — 夜曲")
+        XCTAssertEqual(reader.lastText, "已暂停 · 夜曲0 — 夜曲")
+
+        store.togglePlayPause()
+        snapshot = try await waitCaughtUp(reader, store) { !$0.isPaused && !$0.isCoreIdle }
+        XCTAssertEqual(PlaybackStatusText.text(for: snapshot), "正在播放 · 夜曲0 — 夜曲")
+
+        // 只有位置变化时文案不变：状态条不会被播放进度带着重算。
+        let before = try XCTUnwrap(reader.lastSnapshot)
+        store.seek(to: 12)
+        let after = try await waitCaughtUp(reader, store) { $0.position == 12 && !$0.isPaused }
+        XCTAssertNotEqual(after.position, before.position, "这次快照确实换了进度")
+        XCTAssertEqual(PlaybackStatusText.text(for: after), PlaybackStatusText.text(for: before))
+        XCTAssertEqual(reader.lastText, "正在播放 · 夜曲0 — 夜曲")
     }
 
     /// 停止后状态条仍在（当前曲保留），但标签变为「已停止」。
@@ -209,11 +199,52 @@ final class PlaybackEntryUITests: XCTestCase {
         let reader = TextReader(store.observeState())
 
         store.playTrack(track)
-        try await reader.waitForText("正在播放 · 停0 — 停")
+        _ = try await waitCaughtUp(reader, store) { $0.currentTrack?.id == track.id && !$0.isCoreIdle }
 
         store.stop()
+        let stopped = try await waitCaughtUp(reader, store) { $0.isCoreIdle && $0.currentTrack != nil }
 
-        try await reader.waitForText("已停止 · 停0 — 停")
+        XCTAssertEqual(PlaybackStatusText.text(for: stopped), "已停止 · 停0 — 停")
+        XCTAssertEqual(reader.lastText, "已停止 · 停0 — 停")
+    }
+
+    /// 等到「状态条消费到的快照」追平 store 的当前快照，返回那份快照。
+    ///
+    /// 为什么用「追平」而不是「日志里出现过某条文案」——两者对出站流的假设不同：
+    ///   - store.observeState() 是 bufferingNewest(1) 的有损流，中间快照会被更新的顶掉。
+    ///     因此「某个历史快照一定进过状态条」并不成立，按文案轮询会偶发等不到（实测 20s 超时）；
+    ///     而且同一条文案在用例里会重复出现，contains 匹配还会让等待提前假通过。
+    ///   - 但「最新的那一份一定会被交付」成立：被顶掉的只可能是更旧的。
+    /// 于是等到 reader.lastSnapshot == store.snapshot，既证明了订阅链路把当前状态送到了状态条，
+    /// 又保证断言用的就是状态条此刻显示的那份快照，而不是某个过期副本。
+    ///
+    /// 收敛性：内层读到 current 之后才比较 lastSnapshot，后者只会更新，不会倒退；
+    /// 只要不再有新快照产生，两者必然相等。用例里没有别的发布者，因此必然返回。
+    private func waitCaughtUp(
+        _ reader: TextReader,
+        _ store: PlaybackStateStore,
+        seconds: Double = 20,
+        until predicate: @escaping @Sendable (PlaybackSnapshot) -> Bool
+    ) async throws -> PlaybackSnapshot {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            let current = store.snapshot
+            if predicate(current), reader.lastSnapshot == current {
+                return current
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        throw PlaybackEntryTestError.waitTimeout(
+            expected: "状态条追平内存态且满足条件",
+            observed: [describe(store.snapshot), describe(reader.lastSnapshot)]
+        )
+    }
+
+    /// 把一份快照渲染成便于诊断的一行文本。
+    private func describe(_ snapshot: PlaybackSnapshot?) -> String {
+        guard let snapshot else { return "<尚未收到快照>" }
+        let text = PlaybackStatusText.text(for: snapshot) ?? "<不显示>"
+        return "\(text) [coreIdle=\(snapshot.isCoreIdle) paused=\(snapshot.isPaused) pos=\(snapshot.position)]"
     }
 
     // MARK: - 工具
@@ -234,80 +265,73 @@ final class PlaybackEntryUITests: XCTestCase {
     }
 }
 
-/// 状态文案读取器：后台消费快照流，把每条快照按「状态条看到的那段映射」折算成文案写进日志，
-/// 测试侧只轮询日志。
+/// 状态条读取器：后台消费快照流，把消费到的**快照**按顺序记下来，测试侧只轮询日志。
 ///
 /// 为什么用「后台消费 + 轮询日志」而不是「每步都 await 下一个快照」：等待超时时被取消的等待者
 /// 会让已经取到的快照落进无人认领的任务里（AsyncStream 的迭代器不响应取消），后续步骤于是
 /// 少看到一次变化，表现为随机超时。日志形态没有这个问题 —— 快照只会被追加，不会被丢弃。
+///
+/// 为什么记快照而不是记渲染好的文案：文案是对快照的纯函数，存快照才能做
+/// 「状态条看到的那份 == store 当前那份」这种追平判断（见 waitCaughtUp）；
+/// 只存文案会丢掉位次信息，同一条文案重复出现时无法区分是哪一次状态。
 private final class TextReader: @unchecked Sendable {
 
     private let lock = NSLock()
-    private var log: [String?] = []
+    private var log: [PlaybackSnapshot] = []
     private var consumer: Task<Void, Never>?
 
     init(_ stream: AsyncStream<PlaybackSnapshot>) {
         consumer = Task { [weak self] in
             for await snapshot in stream {
                 guard let self else { return }
-                self.append(PlaybackStatusText.text(for: snapshot))
+                self.append(snapshot)
             }
         }
     }
 
     deinit { consumer?.cancel() }
 
-    /// 已记录的文案条数。
+    /// 已记录的快照条数。
     var count: Int {
         lock.lock()
         defer { lock.unlock() }
         return log.count
     }
 
-    /// 最后一条文案（尚无记录或最后一条为「不显示」时是 nil）。
-    var lastText: String? {
+    /// 最后消费到的那份快照（即状态条此刻显示的那一份）。
+    var lastSnapshot: PlaybackSnapshot? {
         lock.lock()
         defer { lock.unlock() }
-        return log.last ?? nil
+        return log.last
     }
 
-    /// 等到日志里出现 expected 这条文案。
+    /// 最后一条文案（尚无记录或最后一条为「不显示」时是 nil）。
+    var lastText: String? {
+        guard let snapshot = lastSnapshot else { return nil }
+        return PlaybackStatusText.text(for: snapshot)
+    }
+
+    /// 等到日志条数达到 expected（用于「订阅已建立、首帧已到达」这类断言）。
     /// 20s 上限与全库套件一致：正常毫秒级命中，仅极端负载下兜底。
-    func waitForText(_ expected: String, seconds: Double = 20) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if recorded().contains(expected) { return }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        throw PlaybackEntryTestError.waitTimeout(expected: expected, observed: recorded())
-    }
-
-    /// 等到日志条数达到 expected（用于「状态条确实又收到过一次快照」这类断言）。
     func waitForCount(_ expected: Int, seconds: Double = 20) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if count >= expected { return }
-            try await Task.sleep(nanoseconds: 10_000_000)
+            try await Task.sleep(nanoseconds: 5_000_000)
         }
-        throw PlaybackEntryTestError.waitTimeout(expected: "至少 \(expected) 条快照", observed: recorded())
+        throw PlaybackEntryTestError.waitTimeout(expected: "至少 \(expected) 条快照", observed: [])
     }
 
-    private func append(_ text: String?) {
+    private func append(_ snapshot: PlaybackSnapshot) {
         lock.lock()
-        log.append(text)
+        log.append(snapshot)
         lock.unlock()
-    }
-
-    private func recorded() -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return log.compactMap { $0 }
     }
 }
 
 /// 本文件内部错误标记。
 private enum PlaybackEntryTestError: Error {
-    /// 等待条件在超时前没有满足；带上已观察到的文案便于诊断。
+    /// 等待条件在超时前没有满足；带上双方现场（store 当前快照 / 状态条最后收到的快照）便于诊断。
     case waitTimeout(expected: String, observed: [String])
 }
 

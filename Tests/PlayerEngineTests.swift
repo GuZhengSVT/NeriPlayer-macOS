@@ -18,7 +18,9 @@ final class PlayerEngineTests: XCTestCase {
     private static let longSound = URL(fileURLWithPath: "/System/Library/Sounds/Funk.aiff")
 
     private func makeEngine() throws -> MPVEngine {
-        try MPVEngine(clientName: "engine-test")
+        // .silentAudio：本套件真的会加载并播放系统提示音，静音输出避免测试期间持续出声。
+        // 解码、时长读取与时钟推进仍走真实链路（理由见 MPVLaunchOption.silentAudio）。
+        try MPVEngine(clientName: "engine-test", options: MPVLaunchOption.silentAudio)
     }
 
     // MARK: - 初始状态
@@ -58,7 +60,13 @@ final class PlayerEngineTests: XCTestCase {
 
         try engine.load(url: Self.longSound)
         XCTAssertEqual(engine.currentURL, Self.longSound)
-        let loaded = try await waitForState(engine) { !$0.isCoreIdle }
+
+        // 这里不能用「非空闲」当加载完成信号：引擎在上一首时就已非空闲，而 load() 会把 duration
+        // 复位成 0，于是「非空闲」在重载瞬间就成立、拿到的是一份 duration=0 的中间态。
+        // 上一个用例的注释（非空闲 ⇒ duration 已就位）只对「空闲 → 首个文件」成立。
+        // 因此按「新文件的时长已经报上来」等待：0.56s 的 Tink 与复位后的 0 都落在阈值以下。
+        let loaded = try await waitForState(engine) { !$0.isCoreIdle && $0.duration > 1 }
+        XCTAssertEqual(loaded.currentURL, Self.longSound)
         XCTAssertEqual(loaded.duration, 2.163, accuracy: 0.1, "Funk.aiff 时长约 2.16s")
     }
 

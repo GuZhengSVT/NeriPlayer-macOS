@@ -32,7 +32,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 空 store：无当前曲、非暂停、位置/时长为 0、队列为空。
     func testInitialSnapshotIsEmpty() throws {
-        let store = makeStore(try MPVEngine(clientName: "store-initial"))
+        let store = makeStore(try MPVEngine(clientName: "store-initial", options: MPVLaunchOption.silentAudio))
         let snapshot = store.snapshot
         XCTAssertNil(snapshot.currentTrack)
         XCTAssertEqual(snapshot.position, 0)
@@ -43,7 +43,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// observeState 先推当前快照，再在状态变化时继续推送；属性读取与快照一致。
     func testObserveStateEmitsInitialSnapshotThenChanges() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-observe"))
+        let store = makeStore(try MPVEngine(clientName: "store-observe", options: MPVLaunchOption.silentAudio))
         let reader = SnapshotReader(store.observeState())
 
         let firstSnapshot = await reader.next()
@@ -62,7 +62,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 空队列入队第一首：它立即成为当前曲并开始播放（脱离内核空闲态）。
     func testEnqueueIntoEmptyQueueStartsPlayback() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-enqueue"))
+        let store = makeStore(try MPVEngine(clientName: "store-enqueue", options: MPVLaunchOption.silentAudio))
         let first = track(Self.tinkURL, "Tink")
         store.enqueue(first)
         XCTAssertEqual(store.currentTrack?.id, first.id, "入队后应立即成为当前曲")
@@ -73,7 +73,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// playTrack 把曲目并入队列并立即播放（未在队列中则追加）。
     func testPlayTrackAddsAndPlays() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-playtrack"))
+        let store = makeStore(try MPVEngine(clientName: "store-playtrack", options: MPVLaunchOption.silentAudio))
         let first = track(Self.tinkURL, "Tink")
         store.playTrack(first)
         XCTAssertEqual(store.queueState.tracks.map(\.id), [first.id])
@@ -84,7 +84,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 播放中 toggle 变为暂停，再次 toggle 恢复播放。
     func testTogglePlayPauseReflectsEngine() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-toggle"))
+        let store = makeStore(try MPVEngine(clientName: "store-toggle", options: MPVLaunchOption.silentAudio))
         let first = track(Self.bottleURL, "Bottle")
         store.setQueue([first], startIndex: 0)
         _ = try await waitForSnapshot(store) { $0.currentTrack?.id == first.id && !$0.isCoreIdle && !$0.isPaused }
@@ -100,7 +100,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 单曲循环：自然播完后重新加载同一首并继续播放。
     func testRepeatOneReplaysCurrentTrackAfterEOF() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-repeat-one"))
+        let store = makeStore(try MPVEngine(clientName: "store-repeat-one", options: MPVLaunchOption.silentAudio))
         let only = track(Self.tinkURL, "Tink")
         store.setMode(.repeatOne)
         store.setQueue([only], startIndex: 0)
@@ -114,7 +114,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 列表循环：第一首自然播完后自动接下一首，走到末尾再回卷到首曲。
     func testRepeatAllAdvancesAndWrapsAfterEOF() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-repeat-all"))
+        let store = makeStore(try MPVEngine(clientName: "store-repeat-all", options: MPVLaunchOption.silentAudio))
         let first = track(Self.tinkURL, "Tink")
         let second = track(Self.bottleURL, "Bottle")
         store.setMode(.repeatAll)
@@ -129,7 +129,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 顺序模式：播到最后一首后不再前进，停在末尾（当前曲保留、内核空闲）。
     func testSequentialStopsAtLastTrackAfterEOF() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-sequential"))
+        let store = makeStore(try MPVEngine(clientName: "store-sequential", options: MPVLaunchOption.silentAudio))
         let first = track(Self.tinkURL, "Tink")
         let second = track(Self.bottleURL, "Bottle")
         store.setMode(.sequential)
@@ -149,7 +149,7 @@ final class PlaybackStateStoreTests: XCTestCase {
 
     /// 用户主动 stop 后不应自动推进：即使引擎回到空闲态，当前曲与索引保持不变。
     func testStopDoesNotTriggerAdvance() async throws {
-        let store = makeStore(try MPVEngine(clientName: "store-stop"))
+        let store = makeStore(try MPVEngine(clientName: "store-stop", options: MPVLaunchOption.silentAudio))
         let first = track(Self.bottleURL, "Bottle")
         let second = track(Self.tinkURL, "Tink")
         store.setQueue([first, second], startIndex: 0)

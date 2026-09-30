@@ -49,6 +49,25 @@ final class MPVControllerTests: XCTestCase {
         XCTAssertEqual(try second.getDouble("volume"), 70, accuracy: 0.001)
     }
 
+    // MARK: - 启动选项
+
+    /// 静音启动选项真的把音频输出换成了 null 设备。
+    ///
+    /// 为什么要专门断言：这个选项的意义是「跑测试时不出声」，而「没听到声音」不是可靠的验收信号
+    /// （机器可能整体静音、输出设备可能被占用、采样恰好很短）。直接读回 mpv 的 ao 属性才能证明
+    /// 选项确实在 mpv_initialize 之前生效 —— 若设在初始化之后，mpv 会拒绝改动并保持默认输出。
+    func testSilentAudioOptionSelectsNullOutput() throws {
+        let silent = try MPVController(clientName: "silent", options: MPVLaunchOption.silentAudio)
+        XCTAssertEqual(try silent.getString("ao"), "null", "显式传入静音选项后 AO 应为 null")
+
+        let defaulted = try MPVController(clientName: "default-output")
+        XCTAssertNotEqual(
+            try defaulted.getString("ao"),
+            "null",
+            "未传选项的实例应使用系统默认输出，不该被静音"
+        )
+    }
+
     // MARK: - 属性读写与命令
 
     /// 设置 pause=true 后读回为 true（真实 libmpv 实例）。

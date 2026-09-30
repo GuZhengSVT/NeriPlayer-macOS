@@ -39,9 +39,11 @@ public final class MPVEngine: PlayerEngine, @unchecked Sendable {
     private var observerTasks: [Task<Void, Never>] = []
 
     /// 创建引擎并开始桥接内核属性。
-    /// - Parameter clientName: 仅用于日志区分同进程内的多个实例。
-    public init(clientName: String = "NeriPlayer.Engine") throws {
-        controller = try MPVController(clientName: clientName)
+    /// - Parameters:
+    ///   - clientName: 仅用于日志区分同进程内的多个实例。
+    ///   - options: mpv 启动选项（见 MPVLaunchOption）。测试夹具传 `.silentAudio` 以免真机出声。
+    public init(clientName: String = "NeriPlayer.Engine", options: [MPVLaunchOption] = []) throws {
+        controller = try MPVController(clientName: clientName, options: options)
         startObserving()
     }
 
