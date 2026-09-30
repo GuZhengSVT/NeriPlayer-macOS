@@ -131,14 +131,14 @@ final class PlaybackPersistenceTests: XCTestCase {
         // 记下升级前的 id 与内容，升级后要逐项对得上。
         XCTAssertEqual(try library.allTracks().count, 2)
 
-        // 2) 升级到 v2：同一文件、新 provider，setupIfNeeded 会补跑 v2。
+        // 2) 升级到最新：同一文件、新 provider，setupIfNeeded 会补跑 v2 与 v3。
         let upgraded = try DatabaseProvider(url: provider.databaseURL)
         try upgraded.setupIfNeeded()
 
         let applied = try upgraded.dbQueue.read { db in
             try upgraded.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(applied, ["v1", "v2"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4"])
 
         // 3) v1 数据仍在且未被重建（id 保留）。
         let tracks = try LibraryRepository(upgraded).allTracks()
@@ -162,7 +162,7 @@ final class PlaybackPersistenceTests: XCTestCase {
     }
 
     func testMigrationAppliedOnceAfterUpgrade() throws {
-        // 升级后再新建 provider 应发现 v2 已应用、空转通过（幂等）。
+        // 升级后再新建 provider 应发现迁移均已应用、空转通过（幂等）。
         let provider = try makeV1Provider()
         let upgraded = try DatabaseProvider(url: provider.databaseURL)
         try upgraded.setupIfNeeded()
@@ -171,7 +171,7 @@ final class PlaybackPersistenceTests: XCTestCase {
         let applied = try again.dbQueue.read { db in
             try again.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(applied, ["v1", "v2"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4"])
     }
 
     // MARK: - 播放历史 CRUD

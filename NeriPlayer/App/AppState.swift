@@ -38,11 +38,18 @@ public final class AppState: ObservableObject {
     private var playbackStats: PlaybackStatsRecorder?
     /// 统计管道专用的数据库连接（M3-T2）。与 playbackStats 同生命周期。
     private var statsDatabase: DatabaseProvider?
+    /// 播放现场录制器（M3-T3）。订阅播放快照保存队列/进度/模式；未启动为 nil。
+    private var sessionRecorder: PlaybackSessionRecorder?
+    /// 现场录制专用的数据库连接（M3-T3）。与 sessionRecorder 同生命周期。
+    private var sessionDatabase: DatabaseProvider?
+    /// 设置存储（M3-T3 起用于读取「启动是否自动续播」）。
+    private let settings: SettingsStore
     /// 应用退出通知观察者；stopPlaybackIntegration 时注销。
     private var terminateObserver: NSObjectProtocol?
 
-    public init(isSafeMode: Bool = false) {
+    public init(isSafeMode: Bool = false, settings: SettingsStore = .shared) {
         self.isSafeMode = isSafeMode
+        self.settings = settings
     }
 
     deinit {
@@ -53,6 +60,9 @@ public final class AppState: ObservableObject {
         }
         // 退出前最后一道：把内存里没落库的统计写出去（正常路径已由退出通知触发）。
         playbackStats?.stop()
+        // 现场同理：兜底保存一份，避免绕过 willTerminate 的退出路径丢现场。
+        sessionRecorder?.flushNow(reason: "AppState 释放")
+        sessionRecorder?.stop()
         nowPlaying?.stop()
         playbackStore?.stop()
     }
@@ -111,6 +121,18 @@ public final class AppState: ObservableObject {
     /// 清理播放集成：注销媒体键命令、停止快照订阅、清空 Now Playing。
     /// 幂等，可重复调用（退出通知与 deinit 都会走这里）。
     public func stopPlaybackIntegration() {
+        // 顺序关键：现场必须趁 store 还在、快照还有值时落库。等 store.stop() 之后再来读，
+        // 队列与进度都已经被清空，写下去的会是一份「空现场」，重启后什么都恢复不了。
+        sessionRecorder?.flushNow(reason: "应用退出")
+        sessionRecorder?.stop()
+        sessionRecorder = nil
+        sessionDatabase = nil
+
+        // 统计管道同理：stop() 会把内存里没落库的那段收听写出去。
+        playbackStats?.stop()
+        playbackStats = nil
+        statsDatabase = nil
+
         guard let store = playbackStore, let nowPlaying else { return }
         nowPlaying.stop()
         store.stop()
@@ -146,5 +168,48 @@ public final class AppState: ObservableObject {
         } catch {
             Log.player.error("统计写入管道启动失败（统计不落库，播放不受影响）：\(error.localizedDescription)")
         }
+    }
+
+    // MARK: - 播放现场（M3-T3）
+
+    /// 启动播放现场：先把上次退出的现场恢复到播放内存态，再开始录制新的变化。
+    ///
+    /// 前置：播放集成已启动（playbackStore 非 nil）。幂等：已启动则直接返回。
+    /// 安全模式下不启动 —— 与统计管道同一条理由（安全模式期间不额外读写库），
+    /// 此时应用表现为「每次都从空队列开始」，这是可接受的降级。
+    ///
+    /// 顺序为什么不能反：录制器一订阅就会收到一次当前快照。若先订阅再恢复，那次「空队列」
+    /// 快照会被判成「用户清空了现场」而把刚读出来的行删掉 —— 现场只能在恢复之后才开始录制。
+    public func startPlaybackSession() {
+        guard !isSafeMode, sessionRecorder == nil, let store = playbackStore else { return }
+        do {
+            let database = try DatabaseProvider()
+            try database.setupIfNeeded()
+            let repository = PlayerStateRepository(database)
+
+            if let saved = try repository.load() {
+                store.restore(saved, resumePlayback: shouldResumePlayback(for: saved))
+                Log.player.info(
+                    "已恢复上次播放现场：队列 \(saved.tracks.count) 首，位置 \(Int(saved.position))s，自动续播=\(saved.shouldResumePlayback)"
+                )
+            }
+
+            let recorder = PlaybackSessionRecorder(
+                save: { try repository.save($0) },
+                clear: { try repository.clear() }
+            )
+            recorder.attach(to: store)
+            sessionDatabase = database
+            sessionRecorder = recorder
+            Log.player.info("播放现场录制已就绪：\(database.databaseURL.path, privacy: .public)")
+        } catch {
+            Log.player.error("播放现场启动失败（不恢复也不记录现场，播放不受影响）：\(error.localizedDescription)")
+        }
+    }
+
+    /// 恢复现场时是否自动续播：既要退出时确实在播，也要用户开了「启动后继续播放」。
+    private func shouldResumePlayback(for saved: PlayerState) -> Bool {
+        guard saved.shouldResumePlayback else { return false }
+        return settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
     }
 }

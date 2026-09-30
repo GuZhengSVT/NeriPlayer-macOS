@@ -25,6 +25,8 @@ struct NeriPlayerApp: App {
                     appState.startPlaybackIntegration()
                     // M3-T2：统计写入管道（依赖上一步创建的 playbackStore；安全模式下自行跳过）。
                     appState.startPlaybackStats()
+                    // M3-T3：播放现场 —— 先恢复上次退出的队列/进度/模式，再开始录制新的变化。
+                    appState.startPlaybackSession()
                     // M2-T5：打开媒体库（失败时媒体库 tab 回落占位视图，不影响其他 tab）。
                     appState.startLibrary()
                 }

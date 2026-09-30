@@ -122,6 +122,11 @@ public enum SettingsKeys {
     public static let lastSelectedTab = SettingsKey<String>("lastSelectedTab", default: "home")
     /// 最近一次「崩溃记录已处理」的时间；未处理过则为 nil。
     public static let crashReportHandledAt = OptionalSettingsKey<Date>("crashReportHandledAt")
+    /// 启动后是否自动继续播放上次的现场（M3-T3 保存的现场 + M3-T5 设置项）。
+    ///
+    /// 默认 false：恢复到保存的进度但停在暂停态。一启动就出声对「打开应用看一眼」的场景
+    /// 是打扰，而恢复队列与进度本身没有副作用，所以默认保留现场、不自动播。
+    public static let resumePlaybackOnLaunch = SettingsKey<Bool>("resumePlaybackOnLaunch", default: false)
 }
 
 // MARK: - 变更事件

@@ -76,15 +76,16 @@ final class DatabaseTests: XCTestCase {
 
     func testMigrationTwiceOnSameProviderIsIdempotent() throws {
         let provider = try makeProvider()
-        // 第二次调用：v1/v2 均已应用，应空转且不抛错。
+        // 第二次调用：登记表里的迁移均已应用，应空转且不抛错。
         XCTAssertNoThrow(try provider.setupIfNeeded())
         XCTAssertNoThrow(try provider.setupIfNeeded())
 
         let applied = try provider.dbQueue.read { db in
             try provider.migrator.appliedIdentifiers(db)
         }
-        // v2（M3-T1）也在登记表中，两次调用后应为「已全部应用」。
-        XCTAssertEqual(applied, ["v1", "v2"])
+        // 断言「全部登记项都已应用」。appliedIdentifiers 的返回顺序不承诺稳定，
+        // 因此比集合而不是数组；新增迁移时这里会失败，正好提醒把新版本号补进来。
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4"])
     }
 
     func testMigrationTwiceAcrossProvidersIsIdempotent() throws {

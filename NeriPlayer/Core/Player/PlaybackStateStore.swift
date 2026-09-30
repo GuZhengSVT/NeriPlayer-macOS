@@ -28,7 +28,9 @@
 // 线程模型：沿用本层做法 —— NSLock 串行化内部状态，yield 一律在锁外；引擎与队列各自线程安全，
 // 本类只读取它们最后一次已知的快照。命令方法由调用线程同步发起并立即更新队列，不等事件回流。
 //
-// 边界（不做）：持久化与现场恢复（M3-T3）、媒体键（M1-T6）、输出设备（M1-T7）、音效链路（M1-T8）、UI。
+// 边界（不做）：媒体键（M1-T6）、输出设备（M1-T7）、音效链路（M1-T8）、UI。
+// 现场恢复的入口在本类（restore(_:resumePlayback:)），但「何时保存 / 何时恢复」的编排不在 ——
+// 落库策略见 M3-T3 的 PlaybackSessionRecorder，启动编排见 AppState.
 
 import Foundation
 
@@ -99,6 +101,16 @@ public final class PlaybackStateStore: @unchecked Sendable {
     private var engineState: PlayerEngineState
     /// 引擎/队列状态流的消费任务，deinit 时取消。
     private var observerTasks: [Task<Void, Never>] = []
+    /// 待应用的恢复进度（移植规划 M3-T3）。见 `restore(_:resumePlayback:)`。
+    private var pendingRestore: PendingRestore?
+
+    /// 一次待应用的现场恢复：引擎真正加载起来之后才 seek / 决定播放态。
+    private struct PendingRestore {
+        /// 目标进度（秒）。
+        var position: Double
+        /// 恢复完成后是否立刻开始播放。
+        var shouldPlay: Bool
+    }
 
     // MARK: - 构造
 
@@ -204,6 +216,11 @@ public final class PlaybackStateStore: @unchecked Sendable {
         }
         do {
             if engine.isPaused {
+                // 用户要求继续播放，同时重新武装自动推进：M3-T3 恢复到暂停态的现场
+                // 一开始是「不该推进」的，从这里起才该在 EOF 后接下一首。
+                lock.lock()
+                shouldPlayCurrent = true
+                lock.unlock()
                 try engine.play()
             } else {
                 try engine.pause()
@@ -298,6 +315,49 @@ public final class PlaybackStateStore: @unchecked Sendable {
         publish()
     }
 
+    // MARK: - 命令：恢复现场（M3-T3）
+
+    /// 恢复退出时的现场：整体采纳队列、加载当前曲，并把引擎移到保存的进度。
+    ///
+    /// 进度为什么不在这里直接 seek：libmpv 的 loadfile 是「下发即返回」，此刻文件还没打开，
+    /// 紧接着的 seek 会被内核拒绝（M1-T3 实测）。因此把目标进度挂起，等引擎真正离开空闲态
+    /// （handleEngineState 收到 isCoreIdle == false）再应用一次 —— 事件驱动，不引入定时等待，
+    /// 也不会因为机器慢而在「文件还没打开」时白白丢掉一次 seek。
+    ///
+    /// 恢复后的播放态：`resumePlayback` 为 false 时停在保存的进度上暂停（默认，避免一启动就出声），
+    /// 为 true 时加载完直接继续播。
+    ///
+    /// - Parameters:
+    ///   - state: 保存的现场。
+    ///   - resumePlayback: 恢复完成后是否自动继续播放。
+    public func restore(_ state: PlayerState, resumePlayback: Bool = false) {
+        queue.restore(state.queueState)
+        guard state.currentTrack != nil else {
+            publish()
+            return
+        }
+        lock.lock()
+        // 恢复不是「用户要求播放」：先把自动推进闩锁放开，是否武装由 pendingRestore 决定，
+        // 否则恢复出来的暂停现场一旦收到 EOF 就会自己往下切歌。
+        shouldPlayCurrent = false
+        playbackArmed = false
+        pendingRestore = PendingRestore(position: max(0, state.position), shouldPlay: resumePlayback)
+        lock.unlock()
+        loadCurrent()
+    }
+
+    /// 当前现场（供 M3-T3 落库）。位置取最近一次折叠出的引擎进度，
+    /// 播放意图按「既没暂停、也不是空闲」判定。
+    public func sessionState(now: Date = Date()) -> PlayerState {
+        let snapshot = self.snapshot
+        return PlayerState(
+            queueState: snapshot.queue,
+            position: snapshot.position,
+            shouldResumePlayback: !snapshot.isPaused && !snapshot.isCoreIdle,
+            updatedAt: now
+        )
+    }
+
     // MARK: - 命令：停止 / 转发
 
     /// 停止播放并卸载当前文件。队列内容保留，且不会因此自动推进下一首。
@@ -305,6 +365,7 @@ public final class PlaybackStateStore: @unchecked Sendable {
         lock.lock()
         shouldPlayCurrent = false
         playbackArmed = false
+        pendingRestore = nil
         lock.unlock()
         stopEngine()
         publish()
@@ -331,16 +392,23 @@ public final class PlaybackStateStore: @unchecked Sendable {
     // MARK: - 桥接：状态订阅
 
     /// 订阅引擎与队列两条状态流：引擎流驱动 EOF 判定，队列流驱动快照刷新。
+    ///
+    /// 为什么显式指定 .userInitiated（而不是让 Task 继承创建上下文的优先级）：
+    /// 这两条流是播放状态的唯一折叠路径 —— 界面文案、媒体键、Now Playing、播放现场落库
+    /// 都要等它推进。若不指定，任务会继承调用方的优先级，在调用方是后台/低优先级上下文时
+    /// 被系统排到后面；实测在 CPU 竞争下会出现「引擎事件已经产生、快照却长时间停在旧值」，
+    /// 表现为播放状态卡住（测试里就是各种等待快照超时）。用户可见的播放状态不该被无关的
+    /// 后台工作饿死，所以给它一个明确的、面向交互的优先级。
     private func startObserving() {
         let engineStream = engine.observeState()
-        observerTasks.append(Task { [weak self] in
+        observerTasks.append(Task(priority: .userInitiated) { [weak self] in
             for await state in engineStream {
                 guard let self else { return }
                 handleEngineState(state)
             }
         })
         let queueStream = queue.observeState()
-        observerTasks.append(Task { [weak self] in
+        observerTasks.append(Task(priority: .userInitiated) { [weak self] in
             for await _ in queueStream {
                 guard let self else { return }
                 publish()
@@ -348,9 +416,10 @@ public final class PlaybackStateStore: @unchecked Sendable {
         })
     }
 
-    /// 处理一次引擎状态：维护 EOF 闩锁，必要时按队列模式自动推进。
+    /// 处理一次引擎状态：维护 EOF 闩锁，应用待恢复的现场，必要时按队列模式自动推进。
     private func handleEngineState(_ state: PlayerEngineState) {
         var advanceTo: Track?
+        var restore: PendingRestore?
         lock.lock()
         engineState = state
         if state.isCoreIdle {
@@ -366,13 +435,44 @@ public final class PlaybackStateStore: @unchecked Sendable {
         } else {
             // 真正离开空闲态，说明本轮加载成功并开始播放，可以武装 EOF 判定。
             playbackArmed = true
+            // 文件就绪，现在 seek 才会被内核接受（见 restore 的说明）。只应用一次。
+            if let pending = pendingRestore {
+                pendingRestore = nil
+                restore = pending
+            }
         }
         lock.unlock()
 
         publish()
+        if let restore {
+            applyRestore(restore)
+        }
         if let advanceTo {
             load(advanceTo)
         }
+    }
+
+    /// 应用一次挂起的现场恢复：先跳转到保存的进度，再按意图决定播放还是暂停。
+    ///
+    /// 顺序不能颠倒：loadfile 会把 pause 清掉（M1-T3），先 play 再 seek 会让「恢复到暂停态」
+    /// 在暂停生效前响一小段。
+    private func applyRestore(_ pending: PendingRestore) {
+        do {
+            if pending.position > 0 {
+                try engine.seek(to: pending.position)
+            }
+            if pending.shouldPlay {
+                lock.lock()
+                shouldPlayCurrent = true
+                lock.unlock()
+                try engine.play()
+            } else {
+                try engine.pause()
+            }
+        } catch {
+            Log.player.error("PlaybackStateStore 应用恢复现场失败：\(error.localizedDescription)")
+        }
+        publish()
     }
 
     /// EOF 后按队列模式推进。返回要加载的曲目；顺序模式播到末尾返回 nil 并解除「应播放」标记。

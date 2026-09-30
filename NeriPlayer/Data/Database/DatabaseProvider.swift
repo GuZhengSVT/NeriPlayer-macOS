@@ -132,14 +132,17 @@ public final class DatabaseProvider: @unchecked Sendable {
 
     // MARK: - 迁移定义
 
-    /// 登记全部迁移。当前有 v1（M2-T3 的四张核心表 + 索引）与 v2（M3-T1 的三张持久化表 + 索引）。
+    /// 登记全部迁移。当前有 v1（M2-T3 的四张核心表 + 索引）、v2（M3-T1 的三张持久化表 + 索引）
+    /// 与 v3（M3-T3 给 PlayerState 补「退出时是否在播」一列）。
     ///
     /// 迁移标识用「v1」而非时间戳：这是从零开始的新库（无历史迁移需要区分先后），
-    /// 递增版本号更好读也更好在测试里断言。后续 M3+ 依次追加「v2」「v3」。
+    /// 递增版本号更好读也更好在测试里断言。后续 M3+ 依次追加「v4」…
     private static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1", migrate: migrateV1)
         migrator.registerMigration("v2", migrate: migrateV2)
+        migrator.registerMigration("v3", migrate: migrateV3)
+        migrator.registerMigration("v4", migrate: migrateV4)
         return migrator
     }
 
@@ -295,6 +298,50 @@ public final class DatabaseProvider: @unchecked Sendable {
         )
     }
 
+    /// v3：给 PlayerState 补一列 shouldResumePlayback（移植规划 M3-T3）。
+    ///
+    /// 为什么必须单独存一列，而不是从进度或队列推断：这是「用户退出那一刻的播放意图」。
+    /// 暂停在第 90 秒退出，与播放到第 90 秒被系统杀掉，队列、索引、进度三者完全相同，
+    /// 只有这一列能区分「启动后该不该自己响」。把它推断出来（例如「进度 > 0 就是在播」）
+    /// 会在用户暂停后退出时错误地自动续播。
+    ///
+    /// 默认 false —— v2 老库升级上来的现场没有这个信息，按最保守的语义处理：恢复到暂停态。
+    /// 本迁移只做 ALTER TABLE ADD COLUMN（带非空默认值），是纯增量：既有行的队列与进度原样保留。
+    private static let migrateV3: @Sendable (Database) throws -> Void = { db in
+        try db.alter(table: DatabaseSchema.playerState) { table in
+            table.add(column: "shouldResumePlayback", .boolean).notNull().defaults(to: false)
+        }
+    }
+
+    /// v4：建流量统计表（移植规划 M3-T4）。
+    ///
+    /// 一天一行（dayStart 主键），列分两类：按接入方式（Wi-Fi / 有线 / 蜂窝 / 其他）与
+    /// 按用途（播放 / 下载），外加缓存命中两列。为什么不拆成多张表：这些维度天然正交，
+    /// 且查询形态固定是「取某天/某区间的那一行」，拆表只会让每次写入变成多表事务，
+    /// 在读多写少、每天最多一行的规模下没有收益。
+    ///
+    /// 每列都是「增量累加」语义（见 TrafficStatsRepository 的 upsert），因此全部非空且默认 0 ——
+    /// 免去在 SQL 里处理 NULL 参与加法的问题。
+    ///
+    /// 本迁移只做 CREATE TABLE，不动既有表，v1→v4 升级是纯增量。
+    private static let migrateV4: @Sendable (Database) throws -> Void = { db in
+        try db.create(table: DatabaseSchema.trafficStats) { table in
+            // 本地零点做主键：一天最多一行，重复写入走 ON CONFLICT 累加。
+            table.primaryKey("dayStart", .datetime)
+            table.column("wifiBytes", .integer).notNull().defaults(to: 0)
+            table.column("wiredBytes", .integer).notNull().defaults(to: 0)
+            table.column("cellularBytes", .integer).notNull().defaults(to: 0)
+            table.column("otherBytes", .integer).notNull().defaults(to: 0)
+            table.column("playbackNetworkBytes", .integer).notNull().defaults(to: 0)
+            table.column("downloadNetworkBytes", .integer).notNull().defaults(to: 0)
+            table.column("cacheHitBytes", .integer).notNull().defaults(to: 0)
+            table.column("requestCount", .integer).notNull().defaults(to: 0)
+            table.column("cacheHitCount", .integer).notNull().defaults(to: 0)
+        }
+        // 不额外建索引：本表唯一的查询形态是「按 dayStart 取一行或一个区间」，
+        // 主键本身就是 dayStart 的索引，再建一条是重复。
+    }
+
     // MARK: - 目录
 
     /// 确保库目录存在。
@@ -331,4 +378,6 @@ public enum DatabaseSchema {
     public static let playbackStatsDailyBucket = "PlaybackStatsDailyBucket"
     /// M3-T1：播放器现场单行表（id 恒为 1）。
     public static let playerState = "PlayerState"
+    /// M3-T4：流量统计每日桶（dayStart 主键）。
+    public static let trafficStats = "TrafficStats"
 }

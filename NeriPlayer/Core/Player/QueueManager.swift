@@ -230,6 +230,39 @@ public final class QueueManager: @unchecked Sendable {
         return result
     }
 
+    /// 恢复现场：整体采纳一个队列快照（移植规划 M3-T3）。
+    ///
+    /// 与 `setQueue` 的关键区别：`setQueue` 是「用户选了一组歌要开始播」，会按当前模式重新
+    /// 生成随机序列；本方法是「把退出时的现场原样搬回来」，必须保留当时已经走过的随机序列 ——
+    /// 否则恢复后按「下一首」得到的不是退出前的那一首，用户会感到随机播放被重置了。
+    ///
+    /// 为什么要做不变式修正：现场来自持久化存储，可能被外部改坏（手工编辑、旧版本写入、
+    /// JSON 截断）。这里按 QueueState 的约定把非法输入钳回合法状态，而不是信任它：
+    ///   - 空队列 → 索引置 nil（currentIndex 为 nil ⟺ 队列为空）；
+    ///   - 非空但索引为 nil 或越界 → 钳位到有效范围；
+    ///   - 随机序列与队列不匹配（长度不符或含未知 id）→ 按当前模式重建，保证后续切歌不越界。
+    public func restore(_ state: QueueState) {
+        mutate { current in
+            current.tracks = state.tracks
+            if state.tracks.isEmpty {
+                current.currentIndex = nil
+            } else if let index = state.currentIndex {
+                current.currentIndex = min(max(index, 0), state.tracks.count - 1)
+            } else {
+                current.currentIndex = 0
+            }
+            current.mode = state.mode
+
+            guard state.mode == .shuffle else {
+                current.shuffleOrder = []
+                return
+            }
+            let validOrder = state.shuffleOrder.count == state.tracks.count
+                && Set(state.shuffleOrder) == Set(state.tracks.map(\.id))
+            current.shuffleOrder = validOrder ? state.shuffleOrder : makeShuffleOrder(current)
+        }
+    }
+
     // MARK: - 移除 / 清空
 
     /// 移除指定索引的曲目。

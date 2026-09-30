@@ -223,6 +223,8 @@ public final class PlayerStateRecord: Record {
     public var queue: String
     /// 随机序列 JSON（UUID 字符串数组）。
     public var shuffleOrder: String
+    /// 保存现场时是否正在播放（M3-T3 的 v3 列）。
+    public var shouldResumePlayback: Bool
     public var updatedAt: Date
 
     public override static var databaseTableName: String { DatabaseSchema.playerState }
@@ -234,6 +236,7 @@ public final class PlayerStateRecord: Record {
         mode: String,
         queue: String,
         shuffleOrder: String,
+        shouldResumePlayback: Bool = false,
         updatedAt: Date
     ) {
         self.id = id
@@ -242,6 +245,7 @@ public final class PlayerStateRecord: Record {
         self.mode = mode
         self.queue = queue
         self.shuffleOrder = shuffleOrder
+        self.shouldResumePlayback = shouldResumePlayback
         self.updatedAt = updatedAt
         super.init()
     }
@@ -254,6 +258,7 @@ public final class PlayerStateRecord: Record {
             mode: state.mode.rawValue,
             queue: PlayerStateCodec.encodeQueue(state.tracks),
             shuffleOrder: PlayerStateCodec.encodeShuffleOrder(state.shuffleOrder),
+            shouldResumePlayback: state.shouldResumePlayback,
             updatedAt: state.updatedAt
         )
     }
@@ -265,6 +270,7 @@ public final class PlayerStateRecord: Record {
         self.mode = row["mode"]
         self.queue = row["queue"]
         self.shuffleOrder = row["shuffleOrder"]
+        self.shouldResumePlayback = row["shouldResumePlayback"]
         self.updatedAt = row["updatedAt"]
         try super.init(row: row)
     }
@@ -276,6 +282,7 @@ public final class PlayerStateRecord: Record {
         container["mode"] = mode
         container["queue"] = queue
         container["shuffleOrder"] = shuffleOrder
+        container["shouldResumePlayback"] = shouldResumePlayback
         container["updatedAt"] = updatedAt
     }
 
@@ -288,6 +295,7 @@ public final class PlayerStateRecord: Record {
             position: position,
             mode: PlaybackMode(rawValue: mode) ?? .sequential,
             shuffleOrder: PlayerStateCodec.decodeShuffleOrder(shuffleOrder),
+            shouldResumePlayback: shouldResumePlayback,
             updatedAt: updatedAt
         )
     }

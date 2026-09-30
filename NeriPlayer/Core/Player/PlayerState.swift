@@ -33,6 +33,8 @@ public struct PlayerState: Equatable, Sendable {
     public var mode: PlaybackMode
     /// 随机模式下的播放序列（轨道 id 排列）；非随机模式为空。
     public var shuffleOrder: [UUID]
+    /// 保存现场的那一刻是否正在播放（不是暂停）。决定下次启动要不要自动续播。
+    public var shouldResumePlayback: Bool
     /// 本次现场的最后保存时间。
     public var updatedAt: Date
 
@@ -42,6 +44,7 @@ public struct PlayerState: Equatable, Sendable {
         position: Double,
         mode: PlaybackMode,
         shuffleOrder: [UUID] = [],
+        shouldResumePlayback: Bool = false,
         updatedAt: Date = Date()
     ) {
         self.tracks = tracks
@@ -49,17 +52,24 @@ public struct PlayerState: Equatable, Sendable {
         self.position = position
         self.mode = mode
         self.shuffleOrder = shuffleOrder
+        self.shouldResumePlayback = shouldResumePlayback
         self.updatedAt = updatedAt
     }
 
     /// 由队列快照 + 播放进度构造（保存现场的调用点用这个入口）。
-    public init(queueState: QueueState, position: Double, updatedAt: Date = Date()) {
+    public init(
+        queueState: QueueState,
+        position: Double,
+        shouldResumePlayback: Bool = false,
+        updatedAt: Date = Date()
+    ) {
         self.init(
             tracks: queueState.tracks,
             currentIndex: queueState.currentIndex,
             position: position,
             mode: queueState.mode,
             shuffleOrder: queueState.shuffleOrder,
+            shouldResumePlayback: shouldResumePlayback,
             updatedAt: updatedAt
         )
     }
@@ -82,6 +92,7 @@ public struct PlayerState: Equatable, Sendable {
         position: 0,
         mode: .sequential,
         shuffleOrder: [],
+        shouldResumePlayback: false,
         updatedAt: .distantPast
     )
 }
