@@ -8,9 +8,8 @@
 // 存储值缺失或无法识别时回落到 .home。写回放在 Binding 的 setter 里（而非 onChange），
 // 这样在 macOS 13 部署目标下不依赖 onChange(of:initial:) 的新签名，也不产生弃用警告。
 //
-// M2-T8：窗口底部挂一条 PlaybackStatusBar（跨 tab 常驻），显示当前播放曲名与状态。
-// 放在这里而不是每个 tab 各挂一条：播放是应用级状态，切 tab 不该让状态条一闪一闪；
-// 点击状态条切回媒体库 tab —— 播放入口都在媒体库，这一跳把「现在在放什么」和「去哪儿换歌」连起来。
+// M2-T8/M8：窗口底部挂一条跨 tab 常驻的浮动播放器，统一承载当前曲目、进度与播放控制。
+// 播放是应用级状态，切 tab 不应让控制栏重建；控制栏点击歌词或歌单入口时再跳转到对应页面。
 
 import SwiftUI
 
@@ -87,8 +86,8 @@ struct MainContentView: View {
             // 走 selectionBinding 而不是直接改 @State：点击状态条同样要把 tab 写进设置存储，
             // 否则重启后会回到上一次用侧栏选的 tab，而不是这条状态条带来的一次跳转。
             if let coordinator = appState.onlinePlayback { OnlinePlaybackStatusView(coordinator: coordinator) }
-            PlaybackStatusBar(onActivate: { selectionBinding.wrappedValue = .library },
-                              onLyrics: { lyricsPresented = true })
+            FloatingPlayerBar(onLyrics: { lyricsPresented = true },
+                              onOpenQueue: { selectionBinding.wrappedValue = .library })
         }
         .frame(minWidth: 720, minHeight: 480)
         .sheet(isPresented: $lyricsPresented) {
@@ -104,7 +103,12 @@ struct MainContentView: View {
     /// 详情区。媒体库与设置分派到真实视图，其余 tab 仍是占位。
     @ViewBuilder
     private var detail: some View {
-        if selection == .library, let viewModel = appState.libraryViewModel {
+        if selection == .home, let online = appState.onlineViewModel, let library = appState.libraryViewModel {
+            HomeView(onlineViewModel: online, libraryViewModel: library,
+                     onExplore: { selectionBinding.wrappedValue = .explore },
+                     onLibrary: { selectionBinding.wrappedValue = .library },
+                     onDownloads: { selectionBinding.wrappedValue = .downloads })
+        } else if selection == .library, let viewModel = appState.libraryViewModel {
             LibraryView(viewModel: viewModel)
         } else if selection == .explore, let model = appState.onlineViewModel {
             OnlineExploreView(viewModel: model, enqueueDownload: appState.downloadViewModel?.enqueue,
@@ -116,7 +120,8 @@ struct MainContentView: View {
         } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
             SettingsView(viewModel: settingsViewModel, syncViewModel: appState.syncViewModel,
                          audioEffectsViewModel: appState.audioEffectsViewModel,
-                         listenTogetherViewModel: appState.listenTogetherViewModel)
+                         listenTogetherViewModel: appState.listenTogetherViewModel,
+                         onlineViewModel: appState.onlineViewModel)
         } else {
             PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
         }

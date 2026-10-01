@@ -174,7 +174,10 @@ public final class OnlineViewModel: ObservableObject {
             case .failure(let error): browseErrors["推荐"] = error.localizedDescription
             }
             switch values.1 {
-            case .success(let lists): collections = lists
+            case .success(let lists):
+                // Some accounts leave playlist/favorite-folder covers empty. Resolve the first
+                // playable item and use its artwork without replacing an explicit account cover.
+                collections = await Self.enrichCollectionArtwork(lists, client: client)
             case .failure(let error): browseErrors["歌单"] = error.localizedDescription
             }
             if case .success(let value) = values.2 { account = value }
@@ -201,6 +204,14 @@ public final class OnlineViewModel: ObservableObject {
                 let songs = try await client.songs(in: collection)
                 guard !Task.isCancelled, let self, detailGeneration == token else { return }
                 collectionSongs = songs
+                if selectedCollection?.id == collection.id,
+                   selectedCollection?.artworkURL == nil,
+                   let artworkURL = songs.first?.artworkURL {
+                    selectedCollection?.artworkURL = artworkURL
+                    if let index = collections.firstIndex(where: { $0.id == collection.id }) {
+                        collections[index].artworkURL = artworkURL
+                    }
+                }
                 isLoadingDetail = false
             } catch {
                 guard !Task.isCancelled, let self, detailGeneration == token else { return }
@@ -322,5 +333,27 @@ public final class OnlineViewModel: ObservableObject {
 
     private static func capture<T: Sendable>(_ operation: @Sendable () async throws -> T) async -> Result<T, Error> {
         do { return .success(try await operation()) } catch { return .failure(error) }
+    }
+
+    private static func enrichCollectionArtwork(
+        _ collections: [OnlineCollection],
+        client: any OnlineMusicClient
+    ) async -> [OnlineCollection] {
+        await withTaskGroup(of: OnlineCollection.self, returning: [OnlineCollection].self) { group in
+            for collection in collections {
+                group.addTask {
+                    guard collection.artworkURL == nil else { return collection }
+                    guard let songs = try? await client.songs(in: collection),
+                          let artworkURL = songs.first?.artworkURL else { return collection }
+                    var enriched = collection
+                    enriched.artworkURL = artworkURL
+                    return enriched
+                }
+            }
+            var values: [OnlineCollection] = []
+            for await value in group { values.append(value) }
+            let order = Dictionary(uniqueKeysWithValues: collections.enumerated().map { ($0.element.id, $0.offset) })
+            return values.sorted { order[$0.id, default: .max] < order[$1.id, default: .max] }
+        }
     }
 }
