@@ -110,6 +110,16 @@ final class LyricsViewModel: ObservableObject {
 
     var totalOffset: Int { LyricsTime.adding(offsetMilliseconds, document?.offsetMilliseconds ?? 0) }
 
+    var currentLyricText: String {
+        guard let document, !document.lyrics.lines.isEmpty else { return "暂无歌词" }
+        let state = timeline.state(at: playbackSeconds(), offsetMilliseconds: totalOffset)
+        if let index = state.focusedLineIndices.first, document.lyrics.lines.indices.contains(index) {
+            return document.lyrics.lines[index].content
+        }
+        return document.lyrics.lines.first(where: { $0.start >= state.timeMilliseconds })?.content
+            ?? document.lyrics.lines.last?.content ?? "暂无歌词"
+    }
+
     func playbackSeconds(at date: Date? = nil) -> Double {
         guard let snapshot else { return 0 }
         let elapsed = date.map { min(0.3, max(0, $0.timeIntervalSince(receivedAt))) } ?? 0

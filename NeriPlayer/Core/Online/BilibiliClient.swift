@@ -67,28 +67,54 @@ public actor BilibiliClient: OnlineMusicClient {
         }
     }
 
+    public func syncMetadata(for song: SongData) async throws -> SongData {
+        let identity = try requireIdentity(song)
+        let data = try await video(identity)
+        let pages = data["pages"] as? [[String: Any]] ?? []
+        guard let page = pages.first(where: {
+            if let cid = identity.cid { return BilibiliParsing.positiveID($0["cid"]) == cid }
+            return BilibiliParsing.integer($0["page"]) == identity.page
+        }), let cid = BilibiliParsing.positiveID(page["cid"]) else {
+            throw OnlineError.unavailable("指定的 Bilibili 分 P 已不存在")
+        }
+        var result = song
+        result.sourceSubID = cid
+        result.sourceAudioID = BilibiliParsing.positiveID(data["aid"])
+        result.album = "Bilibili|\(cid)|\(data["bvid"] as? String ?? identity.bvid)"
+        let source = result.sourceAudioID.map { "av" + $0 } ?? (data["bvid"] as? String ?? identity.bvid)
+        result.sourceID = "\(source):cid:\(cid)"
+        return result
+    }
+
     public func resolve(song: SongData) async throws -> ResolvedAudio {
         let identity = try requireIdentity(song)
         let data = try await video(identity)
         let pages = data["pages"] as? [[String: Any]] ?? []
-        guard let page = pages.first(where: { BilibiliParsing.integer($0["page"]) == identity.page }),
+        guard let page = pages.first(where: {
+            if let cid = identity.cid { return BilibiliParsing.positiveID($0["cid"]) == cid }
+            return BilibiliParsing.integer($0["page"]) == identity.page
+        }),
               let cid = BilibiliParsing.positiveID(page["cid"]) else {
             throw OnlineError.unavailable("指定的 Bilibili 分 P 已不存在")
         }
-        let parameters = ["bvid": identity.bvid, "cid": cid, "fnval": "272", "fnver": "0", "fourk": "0", "platform": "pc"]
+        let canonicalBV = data["bvid"] as? String ?? identity.bvid
+        let parameters = ["bvid": canonicalBV, "cid": cid, "fnval": "272", "fnver": "0", "fourk": "0", "platform": "pc"]
         let playData = try await api("/x/player/wbi/playurl", parameters: parameters, signed: true)
         var url = BilibiliParsing.audioURL(playData)
         if url == nil {
             // Android also falls back to html5 progressive media when DASH has no audio.
             let fallback = try await api("/x/player/wbi/playurl", parameters: [
-                "bvid": identity.bvid, "cid": cid, "fnval": "0", "fnver": "0", "platform": "html5", "high_quality": "1"
+                "bvid": canonicalBV, "cid": cid, "fnval": "0", "fnver": "0", "platform": "html5", "high_quality": "1"
             ], signed: true)
             url = BilibiliParsing.audioURL(fallback)
         }
         guard let url else { throw OnlineError.unavailable("Bilibili 未返回可播放音轨") }
         var resolvedSong = song
         resolvedSong.sourceID = identity.sourceID
-        resolvedSong.pageURL = identity.pageURL
+        resolvedSong.sourceSubID = cid
+        resolvedSong.sourceAudioID = BilibiliParsing.positiveID(data["aid"])
+        let pageNumber = BilibiliParsing.integer(page["page"]) ?? identity.page
+        resolvedSong.pageURL = URL(string: "https://www.bilibili.com/video/\(identity.bvid)?p=\(pageNumber)")
         resolvedSong.duration = (page["duration"] as? NSNumber)?.doubleValue ?? song.duration
         let headers = ["User-Agent": Self.userAgent, "Referer": identity.pageURL?.absoluteString ?? "https://www.bilibili.com/"]
         // Session cookies stay on API requests, never leak to CDN audio URLs.
@@ -225,7 +251,8 @@ public actor BilibiliClient: OnlineMusicClient {
     }
 
     private func video(_ identity: BilibiliVideoIdentity) async throws -> [String: Any] {
-        try await api("/x/web-interface/wbi/view", parameters: ["bvid": identity.bvid], signed: true)
+        let parameters = identity.bvid.hasPrefix("av") ? ["aid": String(identity.bvid.dropFirst(2))] : ["bvid": identity.bvid]
+        return try await api("/x/web-interface/wbi/view", parameters: parameters, signed: true)
     }
 
     private func folderPages(path: String, mid: String) async throws -> [[String: Any]] {

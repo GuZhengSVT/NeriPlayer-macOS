@@ -12,12 +12,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    var syncViewModel: SyncViewModel?
+    var audioEffectsViewModel: AudioEffectsViewModel?
+    var listenTogetherViewModel: ListenTogetherViewModel?
 
     var body: some View {
         Form {
             appearanceSection
             playbackSection
+            if let audioEffectsViewModel {
+                AudioEffectsSettingsView(model: audioEffectsViewModel)
+            }
             libraryDirectorySection
+            if let listenTogetherViewModel { ListenTogetherSettingsView(model: listenTogetherViewModel) }
+            if let syncViewModel { SyncSettingsSections(viewModel: syncViewModel) }
         }
         .formStyle(.grouped)
         .navigationTitle("设置")

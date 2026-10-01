@@ -269,6 +269,9 @@ public struct PlaybackStatsRepository: Sendable {
         try database.dbQueue.write { db in
             _ = try PlaybackStatsDailyBucketRecord.deleteAll(db)
             _ = try PlaybackStatsRecord.deleteAll(db)
+            let clear = try JSONEncoder().encode(SyncSnapshot.milliseconds())
+            try db.execute(sql: "INSERT INTO SyncJournal (key, value) VALUES ('statsClearedAt', ?) " +
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", arguments: [clear])
         }
     }
 

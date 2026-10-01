@@ -144,6 +144,8 @@ public enum SettingsKeys {
     public static let lyricsPhonetic = SettingsKey<Bool>("lyricsPhonetic", default: true)
     public static let lyricsAssociations = SettingsKey<Data>("lyricsAssociations", default: Data())
     public static let lyricsOffsets = SettingsKey<Data>("lyricsOffsets", default: Data())
+    /// M8-T4/T6: persisted playback filters, fades and optional exclusive output.
+    public static let audioEffects = SettingsKey<Data>("audioEffects", default: Data())
 }
 
 // MARK: - 变更事件

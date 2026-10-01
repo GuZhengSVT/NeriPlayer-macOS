@@ -1,0 +1,41 @@
+# M9-T5: tag-triggered release build. Signing and notarization are optional.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+      - name: Vendor libmpv
+        run: Tools/fetch-mpv.sh
+      - name: Package app and DMG
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY || '-' }}
+          NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE || '' }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: Tools/package.sh
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeriPlayer-${{ github.ref_name }}
+          path: dist/*.dmg
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg \
+            --draft --title "NeriPlayer $GITHUB_REF_NAME" \
+            --generate-notes

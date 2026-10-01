@@ -1,0 +1,1174 @@
+{
+  "$defs" : {
+    "bucket" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "album" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "albumId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "artist" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "counterBaseListenMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterBasePlayCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterShards" : {
+          "items" : {
+            "$ref" : "#/$defs/shard"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "coverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "dayStartAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "firstPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "identityKey" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "lastPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "mediaUri" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "totalListenMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "favorite" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "addedTime" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "browseId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "coverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "isDeleted" : {
+          "type" : [
+            "boolean",
+            "null"
+          ]
+        },
+        "modifiedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "songs" : {
+          "items" : {
+            "$ref" : "#/$defs/song"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "sortOrder" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "source" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "subtitle" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "trackCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "interval" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "endMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "startMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "log" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "action" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "details" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "songId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "timestamp" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "playlist" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "createdAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "isDeleted" : {
+          "type" : [
+            "boolean",
+            "null"
+          ]
+        },
+        "modifiedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "songOrderVersion" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "songs" : {
+          "items" : {
+            "$ref" : "#/$defs/song"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "playlistBucket" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "counterBasePlayCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterShards" : {
+          "items" : {
+            "$ref" : "#/$defs/shard"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "dayStartAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "firstPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "lastPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "playlistStat" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "counterBasePlayCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterShards" : {
+          "items" : {
+            "$ref" : "#/$defs/shard"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "firstPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "lastPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "totalPlayCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "recent" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "resumePositionMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "song" : {
+          "$ref" : "#/$defs/song"
+        },
+        "songId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "recentDeletion" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "album" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "deletedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "mediaUri" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "songId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "shard" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "epochStartedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "firstPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "lastPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "totalListenMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "skip" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "bvid" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "cid" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "intervals" : {
+          "items" : {
+            "$ref" : "#/$defs/interval"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "isDeleted" : {
+          "type" : [
+            "boolean",
+            "null"
+          ]
+        },
+        "modifiedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "snapshot" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "biliVideoSkipRules" : {
+          "items" : {
+            "$ref" : "#/$defs/skip"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "deviceName" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "favoritePlaylists" : {
+          "items" : {
+            "$ref" : "#/$defs/favorite"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "lastModified" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "localPlaylistPlaybackBuckets" : {
+          "items" : {
+            "$ref" : "#/$defs/playlistBucket"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "localPlaylistPlaybackStats" : {
+          "items" : {
+            "$ref" : "#/$defs/playlistStat"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "playbackStatBuckets" : {
+          "items" : {
+            "$ref" : "#/$defs/bucket"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "playbackStats" : {
+          "items" : {
+            "$ref" : "#/$defs/stat"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "playbackStatsClearedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playlistSongDeletions" : {
+          "items" : {
+            "$ref" : "#/$defs/songDeletion"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "playlistUsageStats" : {
+          "items" : {
+            "$ref" : "#/$defs/usage"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "playlists" : {
+          "items" : {
+            "$ref" : "#/$defs/playlist"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "recentPlayDeletions" : {
+          "items" : {
+            "$ref" : "#/$defs/recentDeletion"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "recentPlays" : {
+          "items" : {
+            "$ref" : "#/$defs/recent"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "syncLog" : {
+          "items" : {
+            "$ref" : "#/$defs/log"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "version" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "song" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "addedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "album" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "albumId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "artist" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "audioId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "channelId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "coverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "customArtist" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "customCoverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "customName" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "legacyAddedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "matchedLyric" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "matchedLyricSource" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "matchedSongId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "matchedTranslatedLyric" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "mediaUri" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "originalArtist" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "originalCoverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "originalLyric" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "originalName" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "originalTranslatedLyric" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playlistContextId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "subAudioId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "syncMembershipTokens" : {
+          "items" : {
+            "$ref" : "#/$defs/token"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "syncMetadataVersion" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "userLyricOffsetMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "songDeletion" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "album" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "deletedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "mediaUri" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "removedMembershipTokens" : {
+          "items" : {
+            "$ref" : "#/$defs/token"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "songId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "stat" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "album" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "albumId" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "artist" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "counterBaseListenMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterBasePlayCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterShards" : {
+          "items" : {
+            "$ref" : "#/$defs/shard"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "coverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "firstPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "identityKey" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "lastPlayedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "mediaUri" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "totalListenMs" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "token" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "counter" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "deviceId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    },
+    "usage" : {
+      "additionalProperties" : true,
+      "properties" : {
+        "browseId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "counterBaseOpenCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "counterShards" : {
+          "items" : {
+            "$ref" : "#/$defs/shard"
+          },
+          "type" : [
+            "array",
+            "null"
+          ]
+        },
+        "coverUrl" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "fid" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "firstOpenedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "id" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "lastOpenedAt" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "mid" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "name" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "openCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "playlistId" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "playlistKey" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "source" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "subtitle" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "subtype" : {
+          "type" : [
+            "string",
+            "null"
+          ]
+        },
+        "trackCount" : {
+          "type" : [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type" : "object"
+    }
+  },
+  "$ref" : "#/$defs/snapshot",
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "title" : "NeriPlayer Android-compatible SyncData 2.0"
+}

@@ -6,14 +6,24 @@ import Foundation
 public struct BilibiliVideoIdentity: Equatable, Sendable {
     public let bvid: String
     public let page: Int
+    public let cid: String?
 
     public init(sourceID: String) throws {
         let parts = sourceID.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 1 || parts.count == 2 else { throw OnlineError.invalidInput("Invalid Bilibili video identity") }
+        guard parts.count == 1 || parts.count == 2 || (parts.count == 3 && parts[1] == "cid") else {
+            throw OnlineError.invalidInput("Invalid Bilibili video identity")
+        }
         let identifier = String(parts[0])
-        guard identifier.count == 12, identifier.hasPrefix("BV"), identifier.allSatisfy({ $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber }) else {
+        let isBV = identifier.count == 12 && identifier.hasPrefix("BV") &&
+            identifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
+        let isAV = identifier.hasPrefix("av") && (Int64(identifier.dropFirst(2)) ?? 0) > 0
+        guard isBV || isAV else {
             throw OnlineError.invalidInput("Invalid Bilibili BV identifier")
         }
+        if parts.count == 3 {
+            guard let number = Int64(parts[2]), number > 0 else { throw OnlineError.invalidInput("Invalid Bilibili cid") }
+            cid = String(parts[2])
+        } else { cid = nil }
         let requestedPage = parts.count == 2 ? Int(parts[1]) : 1
         guard let page = requestedPage, (1...10_000).contains(page) else {
             throw OnlineError.invalidInput("Invalid Bilibili page")
@@ -22,7 +32,7 @@ public struct BilibiliVideoIdentity: Equatable, Sendable {
         self.page = page
     }
 
-    public var sourceID: String { "\(bvid):\(page)" }
+    public var sourceID: String { cid.map { "\(bvid):cid:\($0)" } ?? "\(bvid):\(page)" }
     public var pageURL: URL? { URL(string: "https://www.bilibili.com/video/\(bvid)?p=\(page)") }
 }
 

@@ -210,6 +210,7 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
     private let flushInterval: TimeInterval
     private let timer: any PlaybackStatsTimerScheduling
     private let flushHandler: PlaybackStatsFlush
+    private let prepareTrack: @Sendable (Track) throws -> Track
 
     /// - Parameters:
     ///   - flushInterval: 周期 flush 间隔（秒），默认 30。
@@ -224,6 +225,7 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
         clock: @escaping @Sendable () -> Date = { Date() },
         dayStarter: @escaping @Sendable (Date) -> Date = { PlaybackStatsDailyBucket.dayStart(for: $0) },
         timer: any PlaybackStatsTimerScheduling = DispatchSourceTimerScheduler(),
+        prepareTrack: @escaping @Sendable (Track) throws -> Track = { $0 },
         flush: @escaping PlaybackStatsFlush
     ) {
         self.flushInterval = flushInterval
@@ -232,6 +234,7 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
         self.dayStarter = dayStarter
         self.timer = timer
         self.flushHandler = flush
+        self.prepareTrack = prepareTrack
     }
 
     deinit {
@@ -288,8 +291,21 @@ public final class PlaybackStatsRecorder: @unchecked Sendable {
 
         let stream = store.observeState()
         subscription = Task { [weak self] in
-            for await snapshot in stream {
+            var preparedID: UUID?
+            var preparedTrack: Track?
+            for await value in stream {
                 guard let self, !Task.isCancelled else { return }
+                var snapshot = value
+                if let track = snapshot.currentTrack {
+                    if track.id != preparedID {
+                        do {
+                            preparedTrack = try self.prepareTrack(track); preparedID = track.id
+                        } catch {
+                            Log.db.error("播放元数据登记失败：\(error.localizedDescription)"); continue
+                        }
+                    }
+                    snapshot.currentTrack = preparedTrack
+                }
                 self.handle(snapshot, generation: generation)
             }
         }

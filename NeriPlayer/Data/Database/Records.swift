@@ -126,7 +126,10 @@ public final class TrackRecord: Record {
             url: URL(string: url) ?? URL(fileURLWithPath: url),
             title: title,
             artist: artist,
-            duration: durationSeconds
+            duration: durationSeconds,
+            onlineSong: URL(string: url).flatMap {
+                SongData.fromIdentityURL($0, title: title, artist: artist ?? "", album: album ?? "", duration: durationSeconds)
+            }
         )
     }
 

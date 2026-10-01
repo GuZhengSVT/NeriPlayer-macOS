@@ -24,6 +24,8 @@ public struct SongData: Identifiable, Codable, Hashable, Sendable {
     public var duration: Double?
     public var artworkURL: URL?
     public var pageURL: URL?
+    public var sourceSubID: String?
+    public var sourceAudioID: String?
     public var id: String { "\(source.rawValue):\(sourceID)" }
 
     public init(source: MusicSource, sourceID: String, title: String, artist: String = "",
@@ -36,6 +38,8 @@ public struct SongData: Identifiable, Codable, Hashable, Sendable {
         self.duration = duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         self.artworkURL = artworkURL
         self.pageURL = pageURL
+        self.sourceSubID = nil
+        self.sourceAudioID = nil
     }
 
     public var identityURL: URL {

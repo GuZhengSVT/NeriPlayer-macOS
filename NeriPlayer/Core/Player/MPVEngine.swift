@@ -192,6 +192,22 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
         try perform { try controller.setVolume(volume) }
     }
 
+    func applyAudioEffects(_ settings: AudioEffectSettings) {
+        do {
+            try perform {
+                try controller.setDouble("volume-gain-max", 15)
+                try controller.setDouble("volume-gain", settings.loudnessEnabled ? settings.loudnessGain : 0)
+                try controller.setString("af", settings.enabled ? AudioEffectCommandPlan.filterString(for: settings) : "")
+                if let device = settings.outputDevice {
+                    try controller.setString("audio-device", device)
+                }
+                try controller.setString("ao", settings.exclusiveOutput ? "coreaudio_exclusive" : "coreaudio")
+            }
+        } catch {
+            Log.player.error("应用音效设置失败：\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - 状态订阅
 
     public func observeState() -> AsyncStream<PlayerEngineState> {

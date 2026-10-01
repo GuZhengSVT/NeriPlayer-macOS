@@ -63,6 +63,7 @@ public struct LibraryTrack: Identifiable, Equatable, Hashable, Sendable {
 
     /// 共享字段投影回播放链路的 `Track`。id/url/title/artist/duration 一一对应。
     public var track: Track {
-        Track(id: id, url: url, title: title, artist: artist, duration: duration)
+        Track(id: id, url: url, title: title, artist: artist, duration: duration,
+              onlineSong: SongData.fromIdentityURL(url, title: title, artist: artist ?? "", album: album ?? "", duration: duration))
     }
 }

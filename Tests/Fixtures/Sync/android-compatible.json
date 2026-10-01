@@ -1,0 +1,45 @@
+{
+  "version": "2.0",
+  "deviceId": "android-fixture",
+  "deviceName": "Android compatibility fixture",
+  "lastModified": 1700000001000,
+  "playlists": [
+    {
+      "id": 1700000000001,
+      "name": "Golden playlist",
+      "createdAt": 1700000000001,
+      "modifiedAt": 1700000001000,
+      "songOrderVersion": 1,
+      "songs": [
+        {
+          "id": -8123456789123456789,
+          "name": "Golden",
+          "artist": "Artist",
+          "album": "youtube_music",
+          "durationMs": 180000,
+          "mediaUri": "ytmusic://video/AbCdEF12345",
+          "addedAt": 1700000000999,
+          "matchedLyric": "[00:01]Golden",
+          "customName": "Custom",
+          "channelId": "youtube_music",
+          "audioId": "AbCdEF12345",
+          "syncMembershipTokens": [{"deviceId": "android-fixture", "counter": 1}],
+          "syncMetadataVersion": 1
+        }
+      ]
+    }
+  ],
+  "favoritePlaylists": [],
+  "recentPlays": [],
+  "syncLog": [],
+  "recentPlayDeletions": [],
+  "playbackStats": [],
+  "playbackStatsClearedAt": 0,
+  "playbackStatBuckets": [],
+  "playlistSongDeletions": [],
+  "playlistUsageStats": [],
+  "localPlaylistPlaybackStats": [],
+  "localPlaylistPlaybackBuckets": [],
+  "biliVideoSkipRules": [],
+  "futureField": "preserved"
+}

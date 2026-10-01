@@ -45,6 +45,11 @@ public final class AppState: ObservableObject {
     /// 放在 AppState 而不是让设置页自建：根视图要用它来应用主题与强调色，
     /// 两处必须是同一份状态，否则设置页改完主题、根视图不会重绘。
     @Published private(set) var settingsViewModel: SettingsViewModel?
+    @Published private(set) var syncViewModel: SyncViewModel?
+    @Published private(set) var audioEffectsViewModel: AudioEffectsViewModel?
+    @Published private(set) var listenTogetherViewModel: ListenTogetherViewModel?
+    let floatingLyricsPanel = FloatingLyricsPanelController()
+    private var globalShortcuts: GlobalShortcutManager?
     /// 媒体库数据库连接（M2-T3）。与 libraryViewModel 同生命周期；本对象关闭即释放。
     private var libraryDatabase: DatabaseProvider?
     /// 统计写入管道（M3-T2）。订阅播放快照累积统计，退出时 flush；未启动为 nil。
@@ -142,7 +147,14 @@ public final class AppState: ObservableObject {
             let store = try PlaybackStateStore()
             playbackStore = store
             nowPlaying = NowPlayingController().attach(to: store)
-            Log.player.info("播放集成已启动：媒体键与 Now Playing 已接入")
+            globalShortcuts = GlobalShortcutManager(
+                play: { [weak store] in store?.togglePlayPause() },
+                pause: { [weak store] in store?.togglePlayPause() },
+                next: { [weak store] in store?.next(force: true) },
+                previous: { [weak store] in store?.previous() }
+            )
+            globalShortcuts?.start()
+            Log.player.info("播放集成已启动：媒体键、Now Playing 与快捷键已接入")
         } catch {
             Log.player.error("播放集成启动失败（媒体键与 Now Playing 不可用）：\(error.localizedDescription)")
         }
@@ -182,6 +194,9 @@ public final class AppState: ObservableObject {
             lyricsViewModel = nil
             Task { @MainActor in lyrics.stop() }
         }
+        Task { @MainActor [floatingLyricsPanel] in floatingLyricsPanel.hide() }
+        globalShortcuts?.stop()
+        globalShortcuts = nil
         guard let store = playbackStore, let nowPlaying else { return }
         nowPlaying.stop()
         store.stop()
@@ -205,7 +220,9 @@ public final class AppState: ObservableObject {
             let database = try DatabaseProvider()
             try database.setupIfNeeded()
             let handler = PlaybackStatsFlushHandler(database)
-            let recorder = PlaybackStatsRecorder(flush: { deltas in try handler.callAsFunction(deltas) })
+            let recorder = PlaybackStatsRecorder(prepareTrack: { track in
+                try SyncRepository(database).registerPlaybackTrack(track)
+            }, flush: { deltas in try handler.callAsFunction(deltas) })
             recorder.attach(to: store)
             statsDatabase = database
             playbackStats = recorder
@@ -316,6 +333,64 @@ public final class AppState: ObservableObject {
         guard let store = playbackStore else { return }
         if lyricsViewModel == nil { lyricsViewModel = LyricsViewModel(settings: settings) }
         lyricsViewModel?.attach(to: store)
+    }
+
+    // MARK: - M8 desktop commands
+
+    @MainActor
+    func handle(url: URL) {
+        guard let action = AppURLRouter.action(for: url), let store = playbackStore else { return }
+        switch action {
+        case .play, .pause: store.togglePlayPause()
+        case .next: store.next(force: true)
+        case .previous: store.previous()
+        }
+    }
+
+    @MainActor
+    func toggleFloatingLyrics() {
+        guard let lyricsViewModel else { return }
+        floatingLyricsPanel.toggle(model: lyricsViewModel)
+    }
+
+    // MARK: - Audio effects (M8)
+
+    @MainActor
+    func startAudioEffects() {
+        guard audioEffectsViewModel == nil else { return }
+        audioEffectsViewModel = AudioEffectsViewModel(settingsStore: settings) { [weak self] value in
+            self?.playbackStore?.applyAudioEffects(value)
+        }
+        if let value = audioEffectsViewModel?.settings { playbackStore?.applyAudioEffects(value) }
+    }
+
+    @MainActor
+    func startListenTogether() {
+        guard listenTogetherViewModel == nil, let playbackStore else { return }
+        listenTogetherViewModel = ListenTogetherViewModel(store: playbackStore)
+    }
+
+    // MARK: - Sync and backup (M7)
+
+    @MainActor
+    func startSync() {
+        guard !isSafeMode, syncViewModel == nil, let database = libraryDatabase else { return }
+        syncViewModel = SyncViewModel(database: database, settings: settings,
+            beforeCapture: { [weak self] in self?.playbackStats?.flush() },
+            beforeRestore: { [weak self] in
+                self?.sessionRecorder?.flushNow(reason: "备份恢复前")
+                self?.playbackStore?.stop()
+                self?.playbackStats?.stop()
+                self?.playbackStats = nil
+                self?.sessionRecorder?.stop()
+                self?.sessionRecorder = nil
+            }, afterRestore: { [weak self] in
+                self?.startPlaybackStats()
+                self?.startPlaybackSession()
+            }, refresh: { [weak self] in
+                self?.libraryViewModel?.refresh()
+                self?.settingsViewModel?.reloadSettings()
+            })
     }
 
     // MARK: - 设置（M3-T5）

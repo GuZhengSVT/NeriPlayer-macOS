@@ -85,7 +85,7 @@ final class DatabaseTests: XCTestCase {
         }
         // 断言「全部登记项都已应用」。appliedIdentifiers 的返回顺序不承诺稳定，
         // 因此比集合而不是数组；新增迁移时这里会失败，正好提醒把新版本号补进来。
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
     }
 
     func testMigrationTwiceAcrossProvidersIsIdempotent() throws {

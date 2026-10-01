@@ -61,6 +61,14 @@ public final class SettingsViewModel: ObservableObject {
         self.directories = self.directoryStore.all()
     }
 
+    func reloadSettings() {
+        appearance = AppearanceMode(storedValue: settings.value(for: SettingsKeys.appAppearance))
+        accent = AccentColorOption(storedValue: settings.value(for: SettingsKeys.accentColor))
+        resumePlaybackOnLaunch = settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
+        defaultVolume = PlaybackBehaviorDefaults.clampedVolume(settings.value(for: SettingsKeys.defaultVolume))
+        refreshDirectories()
+    }
+
     // MARK: 外观
 
     public func setAppearance(_ mode: AppearanceMode) {

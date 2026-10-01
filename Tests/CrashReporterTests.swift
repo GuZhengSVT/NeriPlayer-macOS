@@ -95,6 +95,29 @@ final class CrashReporterTests: XCTestCase {
         XCTAssertNil(reporter.loadReport())
     }
 
+    func testDiagnosticTextContainsSafeReleaseFieldsAndCrashDetails() {
+        reporter.handleUncaught(exception: NSException(name: .genericException,
+                                                       reason: "diagnostic boom",
+                                                       userInfo: nil))
+
+        let text = reporter.diagnosticText()
+
+        XCTAssertTrue(text.contains("NeriPlayer diagnostics"))
+        XCTAssertTrue(text.contains("appVersion: \(AppInfo.versionString)"))
+        XCTAssertTrue(text.contains("name: NSGenericException"))
+        XCTAssertTrue(text.contains("reason: diagnostic boom"))
+        XCTAssertTrue(text.contains("callStackSymbols:"))
+        XCTAssertFalse(text.contains("Application Support"))
+    }
+
+    func testExportDiagnosticsWritesTextFile() throws {
+        let destination = tempDir.appendingPathComponent("diagnostics.txt")
+        try reporter.exportDiagnostics(to: destination)
+
+        let text = try String(contentsOf: destination, encoding: .utf8)
+        XCTAssertEqual(text, reporter.diagnosticText())
+    }
+
     /// 注入的临时目录被使用，不触碰真实 Application Support。
     func testUsesInjectedDirectory() {
         XCTAssertEqual(reporter.reportURL.deletingLastPathComponent(), tempDir)

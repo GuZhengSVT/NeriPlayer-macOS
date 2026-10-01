@@ -6,6 +6,8 @@ import SwiftUI
 struct OnlineExploreView: View {
     @ObservedObject var viewModel: OnlineViewModel
     var enqueueDownload: ((SongData) -> Void)?
+    var addToLocalLibrary: ((SongData, UUID?, Bool) -> Void)?
+    var localPlaylists: [PlaylistInfo] = []
     @State private var loginPresented = false
     @State private var collectionPresented = false
     @State private var collectionID = ""
@@ -141,6 +143,14 @@ struct OnlineExploreView: View {
             Button("下一首播放", systemImage: "text.insert") { viewModel.enqueueNext(song) }
             if let enqueueDownload {
                 Button("下载", systemImage: "arrow.down.circle") { enqueueDownload(song) }
+            }
+            if let addToLocalLibrary {
+                Button("加入本地收藏", systemImage: "heart") { addToLocalLibrary(song, nil, true) }
+                Menu("加入本地歌单") {
+                    ForEach(localPlaylists) { playlist in
+                        Button(playlist.name) { addToLocalLibrary(song, playlist.id, false) }
+                    }
+                }.disabled(localPlaylists.isEmpty)
             }
             if song.source != .youtubeMusic {
                 Button("收藏", systemImage: "star") { viewModel.setFavorite(song, favorite: true) }

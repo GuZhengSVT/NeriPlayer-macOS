@@ -301,7 +301,7 @@ final class TrafficStatsTests: XCTestCase {
         let applied = try upgraded.dbQueue.read { db in
             try upgraded.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
 
         // 3) 既有现场原样保留。
         let restored = try XCTUnwrap(try PlayerStateRepository(upgraded).load())

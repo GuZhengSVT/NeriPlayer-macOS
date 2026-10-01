@@ -74,7 +74,11 @@ struct MainContentView: View {
     var body: some View {
         // 上下两段：主内容（侧栏 + 详情）占满剩余高度，播放状态条固定在窗口底部。
         // 状态条自身在「无当前曲」时不渲染，VStack 的高度差正好把主内容补满。
-        VStack(spacing: 0) {
+        ZStack {
+            HyperBackgroundView(dark: appState.settingsViewModel?.appearance == .dark)
+                .ignoresSafeArea()
+                .opacity(0.22)
+            VStack(spacing: 0) {
             NavigationSplitView {
                 sidebar
             } detail: {
@@ -94,6 +98,7 @@ struct MainContentView: View {
         // 视图模型缺失（理论上不会发生，设置不依赖任何可失败资源）时保持系统默认外观。
         .preferredColorScheme(appState.settingsViewModel?.appearance.colorScheme)
         .tint(appState.settingsViewModel?.accent.color)
+        }
     }
 
     /// 详情区。媒体库与设置分派到真实视图，其余 tab 仍是占位。
@@ -102,11 +107,16 @@ struct MainContentView: View {
         if selection == .library, let viewModel = appState.libraryViewModel {
             LibraryView(viewModel: viewModel)
         } else if selection == .explore, let model = appState.onlineViewModel {
-            OnlineExploreView(viewModel: model, enqueueDownload: appState.downloadViewModel?.enqueue)
+            OnlineExploreView(viewModel: model, enqueueDownload: appState.downloadViewModel?.enqueue,
+                              addToLocalLibrary: appState.syncViewModel.map { model in
+                                  { song, playlist, favorite in model.addToLibrary(song, playlistID: playlist, favorite: favorite) }
+                              }, localPlaylists: appState.libraryViewModel?.playlists ?? [])
         } else if selection == .downloads, let downloads = appState.downloadViewModel {
             DownloadsView(viewModel: downloads)
         } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
-            SettingsView(viewModel: settingsViewModel)
+            SettingsView(viewModel: settingsViewModel, syncViewModel: appState.syncViewModel,
+                         audioEffectsViewModel: appState.audioEffectsViewModel,
+                         listenTogetherViewModel: appState.listenTogetherViewModel)
         } else {
             PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
         }

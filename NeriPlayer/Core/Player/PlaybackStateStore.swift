@@ -478,6 +478,11 @@ public final class PlaybackStateStore: @unchecked Sendable {
         publish()
     }
 
+    /// Apply M8 filters and output settings to the backend when supported.
+    func applyAudioEffectsToEngine(_ settings: AudioEffectSettings) {
+        (engine as? MPVEngine)?.applyAudioEffects(settings)
+    }
+
     /// 设置音量（mpv 量程 0–100，可超过 100）。引擎不提供回读，本类不做缓存。
     public func setVolume(_ volume: Double) {
         do {

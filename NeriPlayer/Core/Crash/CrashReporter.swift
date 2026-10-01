@@ -160,6 +160,42 @@ public final class CrashReporter {
 
     // MARK: - 辅助
 
+    /// 导出一份适合附加到 issue 的诊断文本，不包含音频路径、令牌或用户库内容。
+    public func diagnosticText() -> String {
+        var lines = [
+            "NeriPlayer diagnostics",
+            "appVersion: \(AppInfo.versionString)",
+            "osVersion: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+            "architecture: \(Self.machineArchitecture)",
+            "safeModeRequired: \(hasPendingCrashReport())"
+        ]
+        if let report = loadReport() {
+            lines += [
+                "",
+                "lastCrash:",
+                "name: \(report.name)",
+                "reason: \(report.reason)",
+                "timestamp: \(Self.iso8601.string(from: report.timestamp))",
+                "reportVersion: \(report.appVersion)",
+                "handledAt: \(report.handledAt.map { Self.iso8601.string(from: $0) } ?? "pending")",
+                "callStackSymbols:"
+            ]
+            lines.append(contentsOf: report.callStackSymbols.map { "  \($0)" })
+        } else {
+            lines += ["", "lastCrash: none"]
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// 将诊断文本原子写入指定 URL，供分享面板或手动保存使用。
+    public func exportDiagnostics(to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try diagnosticText().write(to: url, atomically: true, encoding: .utf8)
+    }
+
     /// Application Support/NeriPlayer/crash。
     static func defaultDirectory() -> URL {
         let base = FileManager.default
@@ -171,22 +207,24 @@ public final class CrashReporter {
             .appendingPathComponent("crash", isDirectory: true)
     }
 
-    /// 从 Bundle 读取版本；SwiftPM 可执行文件无 Info.plist 时回落为 unknown。
-    static func currentAppVersion() -> String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String
-        let build = info?["CFBundleVersion"] as? String
-        switch (short, build) {
-        case let (.some(short), .some(build)):
-            return "\(short) (\(build))"
-        case let (.some(short), .none):
-            return short
-        case let (.none, .some(build)):
-            return "0.0.0 (\(build))"
-        case (.none, .none):
-            return "unknown"
-        }
+    /// 从统一版本契约读取版本，保证 SwiftPM 与打包应用的诊断一致。
+    static func currentAppVersion() -> String { AppInfo.versionString }
+
+    private static var machineArchitecture: String {
+#if arch(arm64)
+        return "arm64"
+#elseif arch(x86_64)
+        return "x86_64"
+#else
+        return "unknown"
+#endif
     }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()

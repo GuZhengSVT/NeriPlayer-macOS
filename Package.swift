@@ -57,7 +57,7 @@ let appTarget: Target = .executableTarget(
         .product(name: "TagLibSwift", package: "TagLibSwift"),
     ],
     path: "NeriPlayer",
-    resources: [.copy("Resources/YouTubeMusic")],
+    resources: [.copy("Resources/YouTubeMusic"), .copy("Resources/HyperBackground.metal")],
     swiftSettings: [
         // 把 mpv 头文件搜索路径透传给 Swift 编译器的 clang importer，
         // 否则 import CMpv 时构建 CMpv 模块会因为找不到 mpv/client.h 失败。
@@ -94,6 +94,7 @@ let testTarget: Target = .testTarget(
         // 原库在 KugouParserTest 与 AutoParserTest 里各内嵌了一份，这里收成一份共享
         // fixture，测试用 Bundle.module 取（bundle 内的目录名是 "Lyrics"）。
         .copy("Fixtures/Lyrics"),
+        .copy("Fixtures/Sync"),
     ],
     swiftSettings: [
         .unsafeFlags(["-Xcc", "-I" + vendorMpvIncludeDir]),

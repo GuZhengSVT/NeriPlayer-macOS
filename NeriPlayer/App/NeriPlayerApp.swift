@@ -19,6 +19,7 @@ struct NeriPlayerApp: App {
         WindowGroup {
             MainContentView()
                 .environmentObject(appState)
+                .onOpenURL { appState.handle(url: $0) }
                 .task {
                     // 顺序有讲究：先按崩溃记录决定是否降级，再启动播放集成。
                     appState.detectSafeMode()
@@ -27,13 +28,26 @@ struct NeriPlayerApp: App {
                     appState.startLibrary()
                     // 在恢复现场（可能自动播放）之前应用启动音量，避免先以默认音量出声。
                     appState.startSettings()
+                    appState.startAudioEffects()
+                    appState.startListenTogether()
                     appState.startPlaybackStats()
                     // 先恢复，再订阅现场变化，避免空快照覆盖保存的队列。
                     appState.startOnlineSources()
                     appState.startDownloads()
                     appState.startPlaybackSession()
                     appState.startLyrics()
+                    appState.startSync()
                 }
         }
+        MenuBarExtra("NeriPlayer", systemImage: "music.note") {
+            MiniPlayerView().environmentObject(appState)
+        }
+        Window("关于 NeriPlayer", id: "about") {
+            AboutView()
+        }
+        Window("诊断信息", id: "diagnostics") {
+            DiagnosticsView()
+        }
+        .commands { PlayerCommands(appState: appState) }
     }
 }
