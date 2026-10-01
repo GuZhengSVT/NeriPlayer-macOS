@@ -29,33 +29,74 @@ public final class OnlineViewModel: ObservableObject {
     @Published public private(set) var page = 1
     @Published public private(set) var hasMoreResults = false
     @Published public private(set) var searchesAllSources = false
+    @Published public private(set) var recommendationsUpdatedAt: Date?
+    @Published public private(set) var collectionsUpdatedAt: Date?
+    @Published public private(set) var detailUpdatedAt: Date?
+    @Published public private(set) var isLoadingAccount = false
+    @Published public private(set) var isDetailComplete = false
+    var songsSearchEnabled = true
 
     private let manager: OnlineSearchManager
     private let clients: [MusicSource: any OnlineMusicClient]
     private let sessions: OnlineSessionStore
     private var store: PlaybackStateStore?
     private var searchTask: Task<Void, Never>?
-    private var browseTask: Task<Void, Never>?
+    private var browseTasks: [Task<Void, Never>] = []
+    private var artworkTasks: [String: Task<Void, Never>] = [:]
     private var detailTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
+    private var accountTask: Task<Void, Never>?
     private var searchGeneration = UUID()
     private var browseGeneration = UUID()
     private var detailGeneration = UUID()
     private var loginGeneration = UUID()
-    private var loadedSources = Set<MusicSource>()
+    private var detailTaskGeneration = UUID()
+    let content: OnlineContentRepository
+    private var activeContext: String?
+    private var activeSource: MusicSource?
+    private var sessionObservation: AnyCancellable?
+    private let loadsBrowseContent: Bool
+    var loadsRecommendations = true
+    private var scrollAnchors: [String: String] = [:]
 
-    public init(clients: [any OnlineMusicClient], sessions: OnlineSessionStore = .shared, store: PlaybackStateStore? = nil) {
+    private var navigationKey: String { "\(source.rawValue):\(activeContext ?? "")" }
+    var browseScrollAnchor: String? { scrollAnchors[navigationKey] }
+    func rememberBrowseAnchor(_ id: String) { scrollAnchors[navigationKey] = id }
+
+    public convenience init(clients: [any OnlineMusicClient], sessions: OnlineSessionStore = .shared,
+                            store: PlaybackStateStore? = nil) {
+        self.init(clients: clients, sessions: sessions, store: store,
+                  content: OnlineContentRepository(clients: clients, sessions: sessions))
+    }
+
+    init(clients: [any OnlineMusicClient], sessions: OnlineSessionStore, store: PlaybackStateStore?,
+         content: OnlineContentRepository, loadsBrowseContent: Bool = true) {
         var indexed: [MusicSource: any OnlineMusicClient] = [:]
         for client in clients { indexed[client.source] = client }
         self.clients = indexed
         manager = OnlineSearchManager(clients: clients)
         self.sessions = sessions
         self.store = store
+        self.content = content
+        self.loadsBrowseContent = loadsBrowseContent
+        sessionObservation = NotificationCenter.default.publisher(for: OnlineSessionStore.didChange)
+            .sink { [weak self] notification in
+                guard notification.object as? OnlineSessionStore === sessions,
+                      let changed = notification.userInfo?["source"] as? MusicSource else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.source == changed else { return }
+                    self.clearDetail()
+                    self.activeContext = nil
+                    self.loadBrowseContent()
+                }
+            }
     }
 
     deinit {
+        accountTask?.cancel()
         searchTask?.cancel()
-        browseTask?.cancel()
+        browseTasks.forEach { $0.cancel() }
+        artworkTasks.values.forEach { $0.cancel() }
         detailTask?.cancel()
         loginTask?.cancel()
     }
@@ -67,6 +108,8 @@ public final class OnlineViewModel: ObservableObject {
 
     public func attachPlaybackStore(_ store: PlaybackStateStore?) { self.store = store }
 
+    func configureLibrarySource(_ value: MusicSource) { source = value }
+
     public func setSource(_ value: MusicSource) {
         guard source != value else { return }
         stopLogin()
@@ -75,7 +118,7 @@ public final class OnlineViewModel: ObservableObject {
         partialErrors = [:]
         errorMessage = nil
         clearDetail()
-        loadBrowseContent(force: true)
+        loadBrowseContent()
         if isSearchMode { search() }
     }
 
@@ -99,6 +142,7 @@ public final class OnlineViewModel: ObservableObject {
         hasMoreResults = false
         partialErrors = [:]
         errorMessage = nil
+        guard songsSearchEnabled else { results = []; isSearching = false; return }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { results = []; isSearching = false; return }
         let token = searchGeneration
@@ -144,44 +188,146 @@ public final class OnlineViewModel: ObservableObject {
         if results.isEmpty, !result.failedSources.isEmpty { errorMessage = "搜索暂不可用" }
     }
 
+    // swiftlint:disable:next cyclomatic_complexity
     public func loadBrowseContent(force: Bool = false) {
-        guard force || !loadedSources.contains(source) else { return }
-        browseTask?.cancel()
-        browseGeneration = UUID()
-        let token = browseGeneration
+        guard loadsBrowseContent else { loadAccountContent(force: force); return }
         let selected = source
-        recommendations = []
-        collections = []
-        browseErrors = [:]
-        account = nil
-        guard let client = clients[selected] else {
-            browseErrors["平台"] = "\(selected.title)暂不可用"
+        let context: String
+        do { context = try content.context(for: selected) } catch {
+            browseErrors["账号"] = error.localizedDescription
             return
         }
-        isLoadingRecommendations = true
-        isLoadingCollections = true
-        browseTask = Task { [weak self] in
-            async let recommendationResult = Self.capture { try await client.recommendations() }
-            async let collectionResult = Self.capture { try await client.collections() }
-            async let accountResult = Self.capture { try await client.account() }
-            let values = await (recommendationResult, collectionResult, accountResult)
-            guard !Task.isCancelled, let self, browseGeneration == token, source == selected else { return }
-            isLoadingRecommendations = false
-            isLoadingCollections = false
-            loadedSources.insert(selected)
-            switch values.0 {
-            case .success(let songs): recommendations = songs
-            case .failure(let error): browseErrors["推荐"] = error.localizedDescription
-            }
-            switch values.1 {
-            case .success(let lists):
-                // Some accounts leave playlist/favorite-folder covers empty. Resolve the first
-                // playable item and use its artwork without replacing an explicit account cover.
-                collections = await Self.enrichCollectionArtwork(lists, client: client)
-            case .failure(let error): browseErrors["歌单"] = error.localizedDescription
-            }
-            if case .success(let value) = values.2 { account = value }
+        guard force || activeSource != selected || context != activeContext
+            || !(isLoadingRecommendations || isLoadingCollections || isLoadingAccount) else { return }
+        browseTasks.forEach { $0.cancel() }
+        artworkTasks.values.forEach { $0.cancel() }
+        artworkTasks = [:]
+        browseGeneration = UUID()
+        let token = browseGeneration
+        if context != activeContext || activeSource != selected {
+            recommendations = []; collections = []; account = nil
+            recommendationsUpdatedAt = nil; collectionsUpdatedAt = nil
         }
+        activeContext = context
+        activeSource = selected
+        browseErrors = [:]
+        if let value = content.cached([SongData].self, source: selected, context: context, resource: "recommendations") {
+            recommendations = value.value; recommendationsUpdatedAt = value.updatedAt
+        }
+        if let value = content.cached([OnlineCollection].self, source: selected, context: context, resource: "collections") {
+            collections = value.value; collectionsUpdatedAt = value.updatedAt
+        }
+        if let value = content.cached(OnlineAccount.self, source: selected, context: context, resource: "account") { account = value.value }
+        isLoadingRecommendations = loadsRecommendations
+        isLoadingCollections = true
+        isLoadingAccount = true
+        let content = self.content
+        browseTasks = [
+            Task { [weak self] in
+                guard let self, self.loadsRecommendations else { return }
+                do {
+                    let value = try await content.recommendations(source: selected, context: context, force: force)
+                    guard acceptsBrowse(token, source: selected, context: context) else { return }
+                    recommendations = value.value; recommendationsUpdatedAt = value.updatedAt
+                    isLoadingRecommendations = false
+                } catch {
+                    guard acceptsBrowse(token, source: selected, context: context) else { return }
+                    browseErrors["推荐"] = error.localizedDescription; isLoadingRecommendations = false
+                }
+            },
+            Task { [weak self] in
+                do {
+                    let value = try await content.collections(source: selected, context: context, force: force)
+                    guard let self, acceptsBrowse(token, source: selected, context: context) else { return }
+                    let covers = Dictionary(collections.compactMap { item in item.artworkURL.map { (item.id, $0) } },
+                                            uniquingKeysWith: { first, _ in first })
+                    collections = value.value.map { item in
+                        var value = item
+                        value.artworkURL = value.artworkURL ?? covers[value.id]
+                        return value
+                    }
+                    collectionsUpdatedAt = value.updatedAt; isLoadingCollections = false
+                } catch {
+                    guard let self, acceptsBrowse(token, source: selected, context: context) else { return }
+                    browseErrors["歌单"] = error.localizedDescription; isLoadingCollections = false
+                }
+            },
+            Task { [weak self] in
+                do {
+                    let value = try await content.account(source: selected, context: context, force: force)
+                    guard let self, acceptsBrowse(token, source: selected, context: context) else { return }
+                    account = value.value; isLoadingAccount = false
+                } catch {
+                    guard let self, acceptsBrowse(token, source: selected, context: context) else { return }
+                    if error as? OnlineError == .authenticationRequired { account = nil } else {
+                        browseErrors["账号"] = error.localizedDescription
+                    }
+                    isLoadingAccount = false
+                }
+            }
+        ]
+    }
+
+    private func acceptsBrowse(_ token: UUID, source: MusicSource, context: String) -> Bool {
+        !Task.isCancelled && browseGeneration == token && self.source == source
+            && activeContext == context && (try? content.context(for: source)) == context
+    }
+
+    func loadAccountContent(force: Bool = false) {
+        let selected = source
+        guard let context = try? content.context(for: selected) else { return }
+        accountTask?.cancel()
+        account = content.cached(OnlineAccount.self, source: selected, context: context, resource: "account")?.value
+        browseErrors["账号"] = nil
+        isLoadingAccount = true
+        accountTask = Task { [weak self] in
+            do {
+                let value = try await self?.content.account(source: selected, context: context, force: force)
+                guard !Task.isCancelled, let self, source == selected, (try? content.context(for: selected)) == context else { return }
+                account = value?.value; isLoadingAccount = false
+            } catch {
+                guard !Task.isCancelled, let self, source == selected else { return }
+                if error as? OnlineError == .authenticationRequired { account = nil } else { browseErrors["账号"] = error.localizedDescription }
+                isLoadingAccount = false
+            }
+        }
+    }
+
+    func loadCollectionArtwork(_ collection: OnlineCollection) {
+        guard collection.artworkURL == nil, artworkTasks[collection.id] == nil,
+              let context = activeContext else { return }
+        let token = browseGeneration
+        let content = self.content
+        artworkTasks[collection.id] = Task { [weak self] in
+            let artwork: URL?
+            do { artwork = try await content.artwork(collection, context: context) } catch {
+                Log.net.error("歌单封面读取失败：\(collection.source.rawValue, privacy: .public)，\(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard let artwork, let self, acceptsBrowse(token, source: collection.source, context: context),
+                  let index = collections.firstIndex(where: { $0.id == collection.id }) else { return }
+            collections[index].artworkURL = artwork
+        }
+    }
+
+    func searchCatalog(query: String, category: CatalogCategory, page: Int) async throws -> [CatalogItem] {
+        guard let client = clients[source] as? any OnlineCatalogClient else {
+            throw OnlineError.unsupported("此平台只支持歌曲搜索")
+        }
+        return try await client.searchCatalog(query: query, category: category, page: page)
+    }
+
+    func artistSongs(_ item: CatalogItem) async throws -> [SongData] {
+        guard let client = clients[item.source] as? any OnlineCatalogClient else { throw OnlineError.invalidResponse }
+        return try await client.artistSongs(id: item.sourceID)
+    }
+
+    func songsForLink(_ link: RecognizedMusicLink) async throws -> [SongData] {
+        if link.source == .bilibili, let client = clients[.bilibili] as? BilibiliClient {
+            return try await client.pages(for: SongData(source: .bilibili, sourceID: link.id, title: link.id))
+        }
+        guard let client = clients[link.source] as? any OnlineCatalogClient else { throw OnlineError.invalidResponse }
+        return try await client.linkedSong(id: link.id)
     }
 
     public func openCollection(id: String, kind: OnlineCollection.Kind) {
@@ -190,31 +336,50 @@ public final class OnlineViewModel: ObservableObject {
         selectCollection(OnlineCollection(source: source, sourceID: value, title: kind == .album ? "专辑" : "歌单", kind: kind))
     }
 
-    public func selectCollection(_ collection: OnlineCollection) {
+    public func selectCollection(_ collection: OnlineCollection, force: Bool = false) {
         detailTask?.cancel()
+        detailTaskGeneration = UUID()
+        let taskToken = detailTaskGeneration
         detailGeneration = UUID()
         let token = detailGeneration
+        let sameCollection = selectedCollection?.id == collection.id
         selectedCollection = collection
-        collectionSongs = []
+        if !sameCollection { collectionSongs = [] }
         detailError = nil
-        guard let client = clients[collection.source] else { detailError = "平台暂不可用"; return }
+        detailUpdatedAt = nil
+        isDetailComplete = false
+        let context: String
+        do { context = try content.context(for: collection.source) } catch {
+            detailError = error.localizedDescription
+            isLoadingDetail = false
+            return
+        }
+        if let value = content.cached(OnlineCollectionDetail.self, source: collection.source, context: context, resource: "detail:\(collection.id)") {
+            selectedCollection = value.value.collection; collectionSongs = value.value.songs; detailUpdatedAt = value.updatedAt
+            isDetailComplete = true
+        }
         isLoadingDetail = true
+        let content = self.content
         detailTask = Task { [weak self] in
             do {
-                let songs = try await client.songs(in: collection)
-                guard !Task.isCancelled, let self, detailGeneration == token else { return }
-                collectionSongs = songs
-                if selectedCollection?.id == collection.id,
-                   selectedCollection?.artworkURL == nil,
-                   let artworkURL = songs.first?.artworkURL {
-                    selectedCollection?.artworkURL = artworkURL
-                    if let index = collections.firstIndex(where: { $0.id == collection.id }) {
-                        collections[index].artworkURL = artworkURL
-                    }
+                let value = try await content.detail(collection, context: context, force: force) { [weak self] songs in
+                    guard let self, self.detailGeneration == token, self.detailTaskGeneration == taskToken,
+                          self.detailUpdatedAt == nil,
+                          (try? content.context(for: collection.source)) == context else { return }
+                    self.collectionSongs = songs
+                }
+                guard !Task.isCancelled, let self, detailGeneration == token,
+                      (try? content.context(for: collection.source)) == context else { return }
+                selectedCollection = value.value.collection; collectionSongs = value.value.songs
+                detailUpdatedAt = value.updatedAt
+                isDetailComplete = true
+                if let index = collections.firstIndex(where: { $0.id == collection.id }) {
+                    collections[index] = value.value.collection
                 }
                 isLoadingDetail = false
             } catch {
-                guard !Task.isCancelled, let self, detailGeneration == token else { return }
+                guard !Task.isCancelled, let self, detailGeneration == token,
+                      (try? content.context(for: collection.source)) == context else { return }
                 detailError = error.localizedDescription
                 isLoadingDetail = false
             }
@@ -224,10 +389,19 @@ public final class OnlineViewModel: ObservableObject {
     public func clearDetail() {
         detailTask?.cancel()
         detailGeneration = UUID()
+        detailTaskGeneration = UUID()
         selectedCollection = nil
         collectionSongs = []
         detailError = nil
+        detailUpdatedAt = nil
+        isDetailComplete = false
         isLoadingDetail = false
+    }
+
+    func refreshCurrentPage() {
+        if let collection = selectedCollection { selectCollection(collection, force: true) } else {
+            loadBrowseContent(force: true)
+        }
     }
 
     public func play(_ song: SongData) {
@@ -236,7 +410,7 @@ public final class OnlineViewModel: ObservableObject {
     }
 
     public func playCollection() {
-        guard let store, !collectionSongs.isEmpty else { return }
+        guard let store, isDetailComplete, !collectionSongs.isEmpty else { return }
         store.setQueue(collectionSongs.map { $0.track() })
     }
 
@@ -312,7 +486,6 @@ public final class OnlineViewModel: ObservableObject {
         do {
             try sessions.clear(source)
             account = nil
-            loadedSources.remove(source)
             loadBrowseContent(force: true)
         } catch { errorMessage = error.localizedDescription }
     }
@@ -325,35 +498,13 @@ public final class OnlineViewModel: ObservableObject {
     }
 
     public func stop() {
-        searchTask?.cancel(); browseTask?.cancel(); detailTask?.cancel(); stopLogin()
+        accountTask?.cancel()
+        searchTask?.cancel(); browseTasks.forEach { $0.cancel() }; detailTask?.cancel(); stopLogin()
+        artworkTasks.values.forEach { $0.cancel() }
+        browseTasks = []; artworkTasks = [:]
         searchGeneration = UUID(); browseGeneration = UUID(); detailGeneration = UUID()
     }
 
     public func clearError() { errorMessage = nil }
 
-    private static func capture<T: Sendable>(_ operation: @Sendable () async throws -> T) async -> Result<T, Error> {
-        do { return .success(try await operation()) } catch { return .failure(error) }
-    }
-
-    private static func enrichCollectionArtwork(
-        _ collections: [OnlineCollection],
-        client: any OnlineMusicClient
-    ) async -> [OnlineCollection] {
-        await withTaskGroup(of: OnlineCollection.self, returning: [OnlineCollection].self) { group in
-            for collection in collections {
-                group.addTask {
-                    guard collection.artworkURL == nil else { return collection }
-                    guard let songs = try? await client.songs(in: collection),
-                          let artworkURL = songs.first?.artworkURL else { return collection }
-                    var enriched = collection
-                    enriched.artworkURL = artworkURL
-                    return enriched
-                }
-            }
-            var values: [OnlineCollection] = []
-            for await value in group { values.append(value) }
-            let order = Dictionary(uniqueKeysWithValues: collections.enumerated().map { ($0.element.id, $0.offset) })
-            return values.sorted { order[$0.id, default: .max] < order[$1.id, default: .max] }
-        }
-    }
 }

@@ -77,6 +77,18 @@ public actor YouTubeMusicClient: OnlineMusicClient {
         let boot = try await authenticatedBootstrap()
         return YouTubeMusicParser.collections(try await post("/youtubei/v1/browse", payload: ["browseId": "FEmusic_liked_playlists"], boot: boot))
     }
+    public func collectionArtwork(in collection: OnlineCollection) async throws -> URL? {
+        let boot = try await bootstrap()
+        let root = try await post("/youtubei/v1/browse", payload: ["browseId": collection.sourceID], boot: boot)
+        return YouTubeMusicParser.songs(root).first(where: { $0.artworkURL != nil })?.artworkURL
+    }
+    public func collectionPage(in collection: OnlineCollection, cursor: String?) async throws -> OnlineCollectionPage {
+        guard collection.source == .youtubeMusic else { throw OnlineError.invalidInput("来源不匹配") }
+        let boot = try await bootstrap()
+        let payload = cursor.map { ["continuation": $0] } ?? ["browseId": collection.sourceID]
+        let root = try await post("/youtubei/v1/browse", payload: payload, boot: boot)
+        return OnlineCollectionPage(songs: YouTubeMusicParser.songs(root), nextCursor: YouTubeMusicParser.continuation(root))
+    }
     public func recommendations() async throws -> [SongData] {
         let boot = try await bootstrap()
         return YouTubeMusicParser.songs(try await post("/youtubei/v1/browse", payload: ["browseId": "FEmusic_home"], boot: boot))
@@ -92,7 +104,8 @@ public actor YouTubeMusicClient: OnlineMusicClient {
         guard boot.loggedIn else { throw OnlineError.authenticationRequired }
         return boot
     }
-    private func bootstrap() async throws -> YouTubeMusicBootstrap {
+    // internal: 首页 shelf 与目录搜索扩展复用同一份 Innertube 引导与请求封装。
+    func bootstrap() async throws -> YouTubeMusicBootstrap {
         let cookie = try sessions.cookieHeader(for: .youtubeMusic)
         let fingerprint = YouTubeMusicCookies.fingerprint(cookie)
         if let cached = memoryBootstrap, cached.usable(fingerprint: fingerprint, now: Date()) { return cached }
@@ -112,7 +125,7 @@ public actor YouTubeMusicClient: OnlineMusicClient {
         memoryBootstrap = parsed; diskCache.save(parsed)
         return parsed
     }
-    private func post(_ path: String, payload: [String: Any], boot: YouTubeMusicBootstrap) async throws -> [String: Any] {
+    func post(_ path: String, payload: [String: Any], boot: YouTubeMusicBootstrap) async throws -> [String: Any] {
         try Task.checkCancellation()
         guard var components = URLComponents(string: origin + path) else { throw OnlineError.invalidResponse }
         components.queryItems = [URLQueryItem(name: "prettyPrint", value: "false"), URLQueryItem(name: "key", value: boot.apiKey)]

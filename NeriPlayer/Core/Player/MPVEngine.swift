@@ -86,6 +86,7 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
     public var isCoreIdle: Bool { snapshot.isCoreIdle }
     public var hasEnded: Bool { snapshot.hasEnded }
     public var hasLoadedFile: Bool { snapshot.hasLoadedFile }
+    public var audioTrackInfo: AudioTrackInfo? { snapshot.audioTrackInfo }
     public var state: PlayerEngineState { snapshot }
 
     // MARK: - 命令
@@ -139,6 +140,8 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
             state.hasEnded = false
             state.hasLoadedFile = false
             state.playbackError = nil
+            // 上一首的规格不能留给这一首：先清空，新文件的编码/比特率等属性事件随后逐项填回。
+            state.audioTrackInfo = nil
         }
         do {
             try perform {
@@ -244,7 +247,12 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
         fileObservation = controller.addFileObserver { [weak self] event in
             self?.applyFileEvent(event)
         }
-        let properties: [MPVProperty] = [.timePosition, .duration, .paused, .coreIdle]
+        // 播放控制用的四条属性 + 展示用的音频规格五条。规格属性用同步订阅（与播放状态同一条路径）：
+        // 它们在文件加载后一次性到位，走同步回调即可，不需要额外消费任务。
+        let properties: [MPVProperty] = [
+            .timePosition, .duration, .paused, .coreIdle,
+            .audioBitrate, .audioSamplerate, .audioChannels, .audioCodecName, .fileFormat
+        ]
         for property in properties {
             let observation = controller.addPropertyObserver(property) { [weak self] change in
                 self?.apply(change)
@@ -278,7 +286,8 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
         }
     }
 
-    /// 把一次属性变更折叠进状态。只在事件线程调用。
+    // 把一次属性变更折叠进状态。只在事件线程调用。
+    // swiftlint:disable:next cyclomatic_complexity
     private func apply(_ change: MPVPropertyChange) {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
@@ -293,8 +302,31 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
         case MPVProperty.coreIdle.rawValue:
             guard let idle = change.flagValue else { return }
             mutate { $0.isCoreIdle = idle }
+        case MPVProperty.audioCodecName.rawValue:
+            updateAudioInfo { $0.setCodec(change.stringValue) }
+        case MPVProperty.fileFormat.rawValue:
+            updateAudioInfo { $0.setContainer(change.stringValue) }
+        case MPVProperty.audioBitrate.rawValue:
+            updateAudioInfo { $0.setBitrate(change.int64Value.map { Int($0) }) }
+        case MPVProperty.audioSamplerate.rawValue:
+            updateAudioInfo { $0.setSampleRate(change.int64Value.map { Int($0) }) }
+        case MPVProperty.audioChannels.rawValue:
+            updateAudioInfo { $0.setChannels(change.int64Value.map { Int($0) }) }
         default:
             break
+        }
+    }
+
+    /// 逐项更新当前音频规格：没有就建一个再改。
+    ///
+    /// 全部字段都被清空（例如文件卸载后内核回报 unavailable）时把 audioTrackInfo 归回 nil，
+    /// 而不是留一个所有字段为空的「空规格」——否则「有没有规格」这一判断会在 nil 与空值之间摇摆，
+    /// 界面整段显隐与快照相等短路都会跟着漂移。
+    private func updateAudioInfo(_ body: (inout AudioTrackInfo) -> Void) {
+        mutate { state in
+            var info = state.audioTrackInfo ?? AudioTrackInfo()
+            body(&info)
+            state.audioTrackInfo = info.isEmpty ? nil : info
         }
     }
 

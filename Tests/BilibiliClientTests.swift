@@ -133,6 +133,19 @@ final class BilibiliClientTests: XCTestCase {
         XCTAssertEqual(collections.first?.kind, .favorites)
     }
 
+    func testFolderArtworkUsesMetadataEndpointWhenListOmitsCover() async throws {
+        let fixture = try BiliHTTPFixture()
+        fixture.handler = { request in
+            XCTAssertEqual(request.url?.path, "/x/v3/fav/folder/info")
+            let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "media_id" }?.value, "55")
+            return .json(#"{"code":0,"data":{"cover":"http://i0.hdslb.com/bfs/archive/cover.jpg"}}"#)
+        }
+        let cover = try await fixture.client().collectionArtwork(in: OnlineCollection(source: .bilibili, sourceID: "55", title: "Favorites", kind: .favorites))
+        XCTAssertEqual(cover?.absoluteString, "https://i0.hdslb.com/bfs/archive/cover.jpg")
+        XCTAssertEqual(fixture.requests.count, 1)
+    }
+
     func testQRMapsStatesAndCommitsCookiesOnlyWhenAuthorized() async throws {
         let fixture = try BiliHTTPFixture()
         let codes = BiliTestQueue([86101, 86090, 0])

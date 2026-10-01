@@ -5,9 +5,11 @@ import SwiftUI
 
 struct OnlineExploreView: View {
     @ObservedObject var viewModel: OnlineViewModel
+    @ObservedObject private var favorites = CollectionFavoritesStore.shared
     var enqueueDownload: ((SongData) -> Void)?
     var addToLocalLibrary: ((SongData, UUID?, Bool) -> Void)?
     var localPlaylists: [PlaylistInfo] = []
+    var showsSearch = true
     @State private var loginPresented = false
     @State private var collectionPresented = false
     @State private var collectionID = ""
@@ -15,15 +17,19 @@ struct OnlineExploreView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Picker("平台", selection: Binding(get: { viewModel.source }, set: viewModel.setSource)) {
-                    ForEach(MusicSource.allCases) { Text($0.title).tag($0) }
-                }.pickerStyle(.segmented).frame(maxWidth: 420)
+                if showsSearch {
+                    Picker("平台", selection: Binding(get: { viewModel.source }, set: viewModel.setSource)) {
+                        ForEach(MusicSource.allCases) { Text($0.title).tag($0) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 420)
+                } else { Text(viewModel.source.title + "媒体库").font(.headline) }
                 Spacer(minLength: 0)
                 Button { collectionPresented = true } label: { Image(systemName: "music.note.list") }.help("打开歌单或专辑")
-                Button { viewModel.loadBrowseContent(force: true) } label: { Image(systemName: "arrow.clockwise") }.help("刷新")
+                Button { viewModel.refreshCurrentPage() } label: { Image(systemName: "arrow.clockwise") }.help("刷新")
+                if viewModel.isLoadingAccount && viewModel.account == nil { ProgressView().controlSize(.small) }
                 Button { loginPresented = true } label: { Label(viewModel.account?.name ?? "登录", systemImage: "person.crop.circle") }
             }.padding(12)
             Divider()
+            if showsSearch {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("搜索歌曲、歌手", text: Binding(get: { viewModel.query }, set: viewModel.setQuery)).textFieldStyle(.plain).onSubmit(viewModel.search)
@@ -35,9 +41,10 @@ struct OnlineExploreView: View {
                 Toggle("全部平台", isOn: Binding(get: { viewModel.searchesAllSources }, set: viewModel.setSearchesAllSources)).toggleStyle(.checkbox)
             }.padding(12)
             Divider()
+            }
             if let collection = viewModel.selectedCollection { detail(collection) } else if viewModel.isSearchMode { searchContent } else { browseContent }
         }
-        .navigationTitle("探索")
+        .navigationTitle(showsSearch ? "搜索" : "媒体库")
         .task { viewModel.loadBrowseContent() }
         .sheet(isPresented: $loginPresented) { OnlineLoginView(viewModel: viewModel) }
         .sheet(isPresented: $collectionPresented) {
@@ -74,31 +81,50 @@ struct OnlineExploreView: View {
         }
     }
     private var browseContent: some View {
-        ScrollView {
+        ScrollViewReader { proxy in
+          ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if !viewModel.browseErrors.isEmpty { messages(viewModel.browseErrors.map { "\($0.key)：\($0.value)" }.sorted()) }
+                if !viewModel.browseErrors.isEmpty {
+                    HStack {
+                        messages(viewModel.browseErrors.map { "\($0.key)：\($0.value)" }.sorted())
+                        Button("重试") { viewModel.loadBrowseContent(force: true) }
+                    }
+                }
                 HStack {
                     Text("歌单与收藏夹").font(.headline)
                     if viewModel.isLoadingCollections { ProgressView().controlSize(.small) }
                 }
                 if viewModel.collections.isEmpty, !viewModel.isLoadingCollections {
-                    Text(viewModel.account == nil ? "登录后查看歌单" : "暂无歌单").foregroundStyle(.secondary)
+                    if viewModel.browseErrors["歌单"] == nil {
+                        Text(viewModel.account == nil ? "登录后查看歌单" : "暂无歌单").foregroundStyle(.secondary)
+                    }
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 220))], alignment: .leading, spacing: 12) {
                     ForEach(viewModel.collections) { collection in
-                        Button { viewModel.selectCollection(collection) } label: {
+                        Button { viewModel.rememberBrowseAnchor(collection.id); viewModel.selectCollection(collection) } label: {
                             VStack(alignment: .leading, spacing: 6) {
                                 OnlineArtwork(url: collection.artworkURL).aspectRatio(1, contentMode: .fit)
                                 Text(collection.title).font(.callout).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                                 Text(collection.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(.plain).id(collection.id)
+                        .task(id: collection.id) { viewModel.loadCollectionArtwork(collection) }
+                        .contextMenu {
+                            Button(favorites.contains(collection) ? "取消收藏歌单" : "收藏歌单") { favorites.toggle(collection) }
+                        }
                     }
                 }
-                HStack { Text("推荐").font(.headline); if viewModel.isLoadingRecommendations { ProgressView().controlSize(.small) } }
-                ForEach(viewModel.recommendations) { song in songRow(song) }
-                if viewModel.recommendations.isEmpty, !viewModel.isLoadingRecommendations { Text("暂无推荐").foregroundStyle(.secondary) }
+                if let updated = viewModel.collectionsUpdatedAt {
+                    Text("歌单更新于 \(updated.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                }
+                if showsSearch {
+                    HStack { Text("推荐").font(.headline); if viewModel.isLoadingRecommendations { ProgressView().controlSize(.small) } }
+                    ForEach(viewModel.recommendations) { song in songRow(song) }
+                }
             }.padding(16)
+          }
+          .onAppear { if let id = viewModel.browseScrollAnchor { proxy.scrollTo(id, anchor: .top) } }
+          .onChange(of: viewModel.source) { _ in if let id = viewModel.browseScrollAnchor { proxy.scrollTo(id, anchor: .top) } }
         }
     }
     private func detail(_ collection: OnlineCollection) -> some View {
@@ -111,11 +137,22 @@ struct OnlineExploreView: View {
                     Text(collection.subtitle).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { favorites.toggle(collection) } label: { Image(systemName: favorites.contains(collection) ? "heart.fill" : "heart") }
+                    .help(favorites.contains(collection) ? "取消收藏歌单" : "收藏歌单")
                 Button { viewModel.playCollection() } label: { Label("播放全部", systemImage: "play.fill") }
-                    .disabled(!viewModel.canPlay || viewModel.collectionSongs.isEmpty)
+                    .disabled(!viewModel.canPlay || !viewModel.isDetailComplete || viewModel.collectionSongs.isEmpty)
             }.padding(12)
-            if viewModel.isLoadingDetail { ProgressView().padding() }
-            if let error = viewModel.detailError { messages([error]) }
+            if viewModel.isLoadingDetail && !viewModel.isDetailComplete {
+                ProgressView("正在加载歌单…已读取 \(viewModel.collectionSongs.count) 首").padding()
+            } else if viewModel.isLoadingDetail {
+                HStack { ProgressView().controlSize(.small); Text("正在后台更新") }.font(.caption).foregroundStyle(.secondary).padding(6)
+            }
+            if let updated = viewModel.detailUpdatedAt {
+                Text("缓存更新于 \(updated.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = viewModel.detailError {
+                HStack { messages([error]); Button("重试") { viewModel.selectCollection(collection, force: true) } }.padding(.horizontal)
+            }
             songList(viewModel.collectionSongs)
         }
     }
@@ -166,14 +203,5 @@ struct OnlineExploreView: View {
     private func durationLabel(_ value: Double) -> String {
         let seconds = Int(min(604_800, max(0, value)))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
-}
-
-struct OnlineArtwork: View {
-    let url: URL?
-    var body: some View {
-        AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: {
-            Rectangle().fill(Color.secondary.opacity(0.08)).overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
-        }.clipped().cornerRadius(4)
     }
 }

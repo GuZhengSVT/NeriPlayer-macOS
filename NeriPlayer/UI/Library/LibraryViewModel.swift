@@ -227,6 +227,12 @@ final class LibraryViewModel: ObservableObject {
             refreshSearchState()
         }
     }
+    @Published var localFilesOnly = false {
+        didSet {
+            guard localFilesOnly != oldValue else { return }
+            invalidateSearchIndex(); recomputeAggregates(); refreshSearchState()
+        }
+    }
     /// 当前选中的歌手组（供详情页回读最新数据）。
     @Published var selectedArtist: ArtistGroup?
     /// 当前选中的专辑组。
@@ -302,11 +308,14 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// 库中是否没有曲目（首次启动引导的显示条件）。
-    var isEmpty: Bool { tracks.isEmpty }
+    var isEmpty: Bool { tracks.isEmpty || (localFilesOnly && sourceTracks.isEmpty) }
 
     /// 当前数据源：全库，或「只看收藏」时的收藏集。搜索索引、聚合、列表都从这里取数，
     /// 因此过滤开关一开，三个维度（歌曲/歌手/专辑）一起收敛为收藏曲目。
-    var sourceTracks: [LibraryTrack] { onlyFavorites ? favorites : tracks }
+    var sourceTracks: [LibraryTrack] {
+        let source = onlyFavorites ? favorites : tracks
+        return localFilesOnly ? source.filter { $0.url.isFileURL } : source
+    }
 
     /// 「只看收藏」开着但一首收藏都没有：视图用它显示「还没有收藏」而不是「库是空的」。
     var isFavoritesFilterEmpty: Bool { onlyFavorites && favorites.isEmpty }
@@ -448,8 +457,13 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// 新建歌单，可选把当前右键的曲目一并加入。
-    func createPlaylist(named name: String, adding track: LibraryTrack?) {
-        guard let trimmed = validatedPlaylistName(name) else { return }
+    ///
+    /// - Returns: 新建成功的歌单；名字非法（去空白后为空）时为 nil。
+    ///   返回实际创建的 PlaylistInfo 而不是 Void：调用方（如当前播放栏为**在线**曲新建歌单）
+    ///   需要精确的目标 id 才能把在线曲入库到「这一个」歌单，用名字回查会在同名歌单存在时误命中。
+    @discardableResult
+    func createPlaylist(named name: String, adding track: LibraryTrack?) -> PlaylistInfo? {
+        guard let trimmed = validatedPlaylistName(name) else { return nil }
         do {
             let playlist = try playlistRepository.create(name: trimmed)
             if let track {
@@ -457,8 +471,10 @@ final class LibraryViewModel: ObservableObject {
             }
             try reloadPlaylistList()
             statusMessage = "已新建歌单「\(trimmed)」"
+            return playlist
         } catch {
             errorMessage = "新建歌单失败：\(error.localizedDescription)"
+            return nil
         }
     }
 

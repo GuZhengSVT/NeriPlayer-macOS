@@ -64,11 +64,17 @@ public struct OnlineCollection: Identifiable, Codable, Hashable, Sendable {
     public var subtitle: String
     public var artworkURL: URL?
     public var kind: Kind
+    /// 平台公开的曲目数；未知为 nil。首页/详情卡片展示用。
+    public var trackCount: Int?
+    /// 平台公开的播放量；未知为 nil。仅网易云等提供该字段的来源会填充。
+    public var playCount: Int?
     public var id: String { "\(source.rawValue):\(kind.rawValue):\(sourceID)" }
     public init(source: MusicSource, sourceID: String, title: String, subtitle: String = "",
-                artworkURL: URL? = nil, kind: Kind = .playlist) {
+                artworkURL: URL? = nil, kind: Kind = .playlist,
+                trackCount: Int? = nil, playCount: Int? = nil) {
         self.source = source; self.sourceID = sourceID; self.title = title
         self.subtitle = subtitle; self.artworkURL = artworkURL; self.kind = kind
+        self.trackCount = trackCount; self.playCount = playCount
     }
 }
 
@@ -82,6 +88,14 @@ public struct ResolvedAudio: Equatable, Sendable {
     }
 }
 
+public struct OnlineCollectionPage: Sendable {
+    public var songs: [SongData]
+    public var nextCursor: String?
+    public init(songs: [SongData], nextCursor: String? = nil) {
+        self.songs = songs; self.nextCursor = nextCursor
+    }
+}
+
 public struct QRLoginTicket: Equatable, Sendable {
     public var key: String
     public var url: URL
@@ -92,7 +106,7 @@ public enum QRLoginState: Equatable, Sendable {
     case waiting, scanned, expired, authorized
 }
 
-public struct OnlineAccount: Equatable, Sendable {
+public struct OnlineAccount: Codable, Equatable, Sendable {
     public var id: String
     public var name: String
     public init(id: String, name: String) { self.id = id; self.name = name }
@@ -115,6 +129,8 @@ public protocol OnlineMusicClient: Sendable {
     func search(query: String, page: Int) async throws -> [SongData]
     func resolve(song: SongData) async throws -> ResolvedAudio
     func songs(in collection: OnlineCollection) async throws -> [SongData]
+    func collectionArtwork(in collection: OnlineCollection) async throws -> URL?
+    func collectionPage(in collection: OnlineCollection, cursor: String?) async throws -> OnlineCollectionPage
     func collections() async throws -> [OnlineCollection]
     func recommendations() async throws -> [SongData]
     func account() async throws -> OnlineAccount
@@ -124,6 +140,10 @@ public protocol OnlineMusicClient: Sendable {
 }
 
 public extension OnlineMusicClient {
+    func collectionPage(in collection: OnlineCollection, cursor: String?) async throws -> OnlineCollectionPage {
+        OnlineCollectionPage(songs: try await songs(in: collection))
+    }
+    func collectionArtwork(in collection: OnlineCollection) async throws -> URL? { nil }
     func search(query: String) async throws -> [SongData] { try await search(query: query, page: 1) }
     func collections() async throws -> [OnlineCollection] { [] }
     func recommendations() async throws -> [SongData] { [] }

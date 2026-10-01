@@ -54,6 +54,7 @@ struct LibraryView: View {
 
     /// 视图模型由上层（MainContentView）持有，这里只观察。
     @ObservedObject var viewModel: LibraryViewModel
+    var favoritesPage = false
     @EnvironmentObject private var appState: AppState
 
     @State private var section: LibrarySection = .songs
@@ -64,6 +65,7 @@ struct LibraryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            libraryCollections
             header
             Divider()
             searchBar
@@ -98,6 +100,30 @@ struct LibraryView: View {
 
     // MARK: 顶栏
 
+    private var libraryCollections: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label(favoritesPage ? "我喜欢的音乐" : "本地音乐", systemImage: favoritesPage ? "heart.fill" : "folder")
+                        .font(.headline)
+                    Text("\(viewModel.sourceTracks.count) 首歌曲").font(.caption).foregroundStyle(.secondary)
+                }.padding(14).frame(width: 180, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                ForEach(viewModel.playlists) { playlist in
+                    Button {
+                        viewModel.openPlaylist(playlist); isShowingPlaylists = true
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label(playlist.name, systemImage: "music.note.list").font(.headline).lineLimit(1)
+                            Text("\(viewModel.playlistCounts[playlist.id] ?? 0) 首歌曲").font(.caption).foregroundStyle(.secondary)
+                        }.padding(14).frame(width: 180, alignment: .leading)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    }.buttonStyle(.plain)
+                }
+            }.padding(12)
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
             Picker("浏览维度", selection: $section) {
@@ -111,12 +137,6 @@ struct LibraryView: View {
 
             Spacer(minLength: 8)
 
-            Toggle(isOn: $viewModel.onlyFavorites) {
-                Label("只看收藏", systemImage: "star")
-            }
-            .toggleStyle(.button)
-            .help("当前列表只显示已收藏的曲目")
-
             Button {
                 isShowingPlaylists = true
             } label: {
@@ -124,13 +144,14 @@ struct LibraryView: View {
             }
             .help("管理歌单：新建、重命名、删除、排序")
 
-            Button {
+            if !favoritesPage { Button {
                 viewModel.addDirectoryAndSync()
             } label: {
                 Label("导入文件夹", systemImage: "folder.badge.plus")
             }
             .disabled(viewModel.isSyncing)
             .help("扫描一个文件夹并把其中的音乐加入媒体库")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -186,11 +207,11 @@ struct LibraryView: View {
         if !viewModel.hasLoaded {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewModel.isEmpty {
-            emptyLibrary
         } else if viewModel.isFavoritesFilterEmpty {
             // 「只看收藏」开着但一首都没收藏：给专门的提示，而不是让用户以为曲目被删了。
             noFavorites
+        } else if viewModel.isEmpty {
+            emptyLibrary
         } else if viewModel.isSearching && viewModel.searchResults.isEmpty {
             noSearchResults
         } else {
@@ -327,7 +348,6 @@ struct LibraryView: View {
             Text("在歌曲行上点星标，或右键选「添加到收藏」。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("显示全部曲目") { viewModel.onlyFavorites = false }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

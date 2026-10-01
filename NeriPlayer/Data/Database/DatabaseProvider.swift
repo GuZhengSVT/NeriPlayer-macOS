@@ -144,6 +144,7 @@ public final class DatabaseProvider: @unchecked Sendable {
         migrator.registerMigration("v3", migrate: migrateV3)
         migrator.registerMigration("v4", migrate: migrateV4)
         migrator.registerMigration("v5", migrate: SyncDatabaseSchema.migrate)
+        migrator.registerMigration("v6", migrate: OnlineContentCache.migrate)
         return migrator
     }
 

@@ -85,7 +85,7 @@ final class DatabaseTests: XCTestCase {
         }
         // 断言「全部登记项都已应用」。appliedIdentifiers 的返回顺序不承诺稳定，
         // 因此比集合而不是数组；新增迁移时这里会失败，正好提醒把新版本号补进来。
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5", "v6"])
     }
 
     func testMigrationTwiceAcrossProvidersIsIdempotent() throws {
@@ -100,6 +100,23 @@ final class DatabaseTests: XCTestCase {
         let third = try DatabaseProvider(url: first.databaseURL)
         try third.setupIfNeeded()
         XCTAssertEqual(try LibraryRepository(third).allTracks().count, 1)
+    }
+
+    func testOnlineContentCachePersistsAcrossProviders() throws {
+        let first = try makeProvider()
+        let cache = OnlineContentCache(database: first)
+        let value = CachedOnlineValue(
+            value: [OnlineCollection(source: .netease, sourceID: "42", title: "测试歌单")],
+            updatedAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        try cache.write(value, key: "netease:test-account:collections")
+
+        let reopened = try DatabaseProvider(url: first.databaseURL)
+        try reopened.setupIfNeeded()
+        let saved = try XCTUnwrap(OnlineContentCache(database: reopened)
+            .read([OnlineCollection].self, key: "netease:test-account:collections"))
+        XCTAssertEqual(saved.value, value.value)
+        XCTAssertEqual(saved.updatedAt, value.updatedAt)
     }
 
     func testForeignKeysAreEnabled() throws {

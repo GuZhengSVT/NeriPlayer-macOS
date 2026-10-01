@@ -8,7 +8,7 @@ public enum AppInfo {
     /// 应用显示名。
     public static let displayName = "NeriPlayer"
     /// macOS 版独立于 Android 版的 SemVer 版本。
-    public static let marketingVersion = "0.9.0"
+    public static let marketingVersion = "0.0.9"
     /// 发布构建号；打包脚本可通过 BUILD_NUMBER 覆盖。
     public static let buildNumber = "1"
     /// 应用标识符，和崩溃日志、URL Scheme 保持一致。

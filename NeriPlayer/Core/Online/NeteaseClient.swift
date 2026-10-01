@@ -5,10 +5,12 @@ import Foundation
 public actor NeteaseClient: OnlineMusicClient {
     public nonisolated let source: MusicSource = .netease
     private let session: URLSession
-    private let sessions: OnlineSessionStore
+    // internal: 首页分区扩展（同模块其他文件）需要读取会话判断是否已登录。
+    let sessions: OnlineSessionStore
     private let baseURL: URL
     private let pageSize = 30
     private let qrLogin: NeteaseQRLoginClient
+    private var playlistTrackIDs: [String: [String]] = [:]
 
     public init(
         session: URLSession = .shared,
@@ -105,6 +107,35 @@ public actor NeteaseClient: OnlineMusicClient {
         return result
     }
 
+    public func collectionArtwork(in collection: OnlineCollection) async throws -> URL? {
+        guard collection.source == .netease, collection.kind != .album else { return collection.artworkURL }
+        let id = try Self.validID(collection.sourceID)
+        let response: NeteasePlaylistDetailResponse = try await post("/weapi/v6/playlist/detail", payload: ["id": id, "n": 1, "s": 0])
+        return response.playlist?.normalizedCollection?.artworkURL
+            ?? response.playlist?.tracks?.compactMap(\.normalized).first(where: { $0.artworkURL != nil })?.artworkURL
+    }
+
+    public func collectionPage(in collection: OnlineCollection, cursor: String?) async throws -> OnlineCollectionPage {
+        guard collection.source == .netease else { throw OnlineError.invalidInput("歌单来源不匹配") }
+        if collection.kind == .album { return OnlineCollectionPage(songs: try await songs(in: collection)) }
+        let id = try Self.validID(collection.sourceID)
+        let context = try sessions.cacheContext(for: .netease)
+        let cacheKey = "\(context):\(collection.id)"
+        let offset = cursor.flatMap(Int.init) ?? 0
+        if cursor == nil {
+            let response: NeteasePlaylistDetailResponse = try await post("/weapi/v6/playlist/detail", payload: ["id": id, "n": 100, "s": 0])
+            guard let playlist = response.playlist else { throw OnlineError.invalidResponse }
+            let ids = playlist.trackIds?.compactMap { $0.id?.value } ?? []
+            if ids.isEmpty { return OnlineCollectionPage(songs: playlist.tracks?.compactMap(\.normalized) ?? []) }
+            playlistTrackIDs[cacheKey] = ids
+        }
+        guard offset >= 0, let ids = playlistTrackIDs[cacheKey], offset < ids.count else { throw OnlineError.invalidResponse }
+        let end = min(offset + 100, ids.count)
+        let page = try await songDetails(ids: Array(ids[offset..<end]))
+        if end == ids.count { playlistTrackIDs[cacheKey] = nil }
+        return OnlineCollectionPage(songs: page, nextCursor: end < ids.count ? String(end) : nil)
+    }
+
     public func recommendations() async throws -> [SongData] {
         try requireSession()
         let response: NeteaseRecommendationResponse = try await post("/weapi/v3/discovery/recommend/songs", payload: [:])
@@ -156,8 +187,15 @@ public actor NeteaseClient: OnlineMusicClient {
     }
 
     // Keep HTTP, API status and session updates in one request transaction.
+    // internal: 首页分区与目录搜索扩展复用同一套加密请求与会话维护。
     // swiftlint:disable:next cyclomatic_complexity
-    private func post<T: Decodable>(_ path: String, payload: [String: Any], allowedCodes: Set<Int> = [200], eapi: Bool = false) async throws -> T {
+    func post<T: Decodable>(
+        _ path: String,
+        payload: [String: Any],
+        allowedCodes: Set<Int> = [200],
+        eapi: Bool = false,
+        useSession: Bool = true
+    ) async throws -> T {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               ["http", "https"].contains(components.scheme?.lowercased() ?? "") else {
             throw OnlineError.invalidInput("无效网易云 API 地址")
@@ -166,7 +204,8 @@ public actor NeteaseClient: OnlineMusicClient {
         components.path = path
         components.query = nil
         components.fragment = nil
-        let cookies = try sessions.cookieHeader(for: .netease)
+        // 匿名回退（useSession=false）不带持久化会话，也不回写响应 Cookie，避免污染登录态。
+        let cookies = try useSession ? sessions.cookieHeader(for: .netease) : nil
         components.queryItems = [URLQueryItem(name: "csrf_token", value: cookies.flatMap { Self.cookieValue("__csrf", in: $0) } ?? "")]
         guard let url = components.url else { throw OnlineError.invalidInput("无效请求地址") }
         var body = payload
@@ -194,8 +233,10 @@ public actor NeteaseClient: OnlineMusicClient {
             guard let code = status.code else { throw OnlineError.invalidResponse }
             if code == 301 || code == 302 { throw OnlineError.authenticationRequired }
             guard allowedCodes.contains(code) else { throw OnlineError.unavailable(status.message ?? "网易云 API 错误：\(code)") }
-            guard try sessions.cookieHeader(for: .netease) == cookies else { throw CancellationError() }
-            try persistResponseCookies(http)
+            if useSession {
+                guard try sessions.cookieHeader(for: .netease) == cookies else { throw CancellationError() }
+                try persistResponseCookies(http)
+            }
             return try JSONDecoder().decode(T.self, from: data)
         } catch is CancellationError {
             throw CancellationError()
@@ -242,18 +283,18 @@ public actor NeteaseClient: OnlineMusicClient {
         return value?.isEmpty == false ? value : nil
     }
 
-    private static func validID(_ string: String) throws -> Int64 {
+    static func validID(_ string: String) throws -> Int64 {
         guard string.allSatisfy({ $0.isASCII && $0.isNumber }), let id = Int64(string), id > 0 else {
             throw OnlineError.invalidInput("网易云 ID 无效")
         }
         return id
     }
 
-    private static func jsonString(_ object: Any) throws -> String {
+    static func jsonString(_ object: Any) throws -> String {
         String(bytes: try JSONSerialization.data(withJSONObject: object), encoding: .utf8) ?? "[]"
     }
 
-    private static func formEncode(_ string: String) -> String {
+    static func formEncode(_ string: String) -> String {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
     }

@@ -138,7 +138,7 @@ final class PlaybackPersistenceTests: XCTestCase {
         let applied = try upgraded.dbQueue.read { db in
             try upgraded.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5", "v6"])
 
         // 3) v1 数据仍在且未被重建（id 保留）。
         let tracks = try LibraryRepository(upgraded).allTracks()
@@ -171,7 +171,7 @@ final class PlaybackPersistenceTests: XCTestCase {
         let applied = try again.dbQueue.read { db in
             try again.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5", "v6"])
     }
 
     // MARK: - 播放历史 CRUD

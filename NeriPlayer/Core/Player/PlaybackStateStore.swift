@@ -32,6 +32,18 @@
 
 import Foundation
 
+// MARK: - 音量
+
+/// 应用音量的缺省值与合法区间。
+///
+/// 区间复用设置层的 PlaybackBehaviorDefaults.volumeRange（0–100）：音量条、设置页滑杆与内存态
+/// 三者必须夹取同一范围，否则会出现「滑杆给 0–100、库存 0–1」这类只能靠比对代码发现的错位。
+/// 缺省取 100（libmpv 初始音量），而不是用户设置里的 70 —— 那是一个尚未下发的偏好；
+/// 应用启动后由 AppState 的「启动音量」把它真正写进内核，届时内存态随之更新。
+public enum PlaybackVolumeDefaults {
+    public static let volume: Double = 100
+}
+
 // MARK: - 内存态快照
 
 /// 播放内存态的一次完整快照：把引擎侧（进度/时长/暂停/空闲）与队列侧（内容/当前曲/模式）聚合成一体。
@@ -54,6 +66,18 @@ public struct PlaybackSnapshot: Equatable, Sendable {
     public var queue: QueueState
     /// Runtime failure is separate from natural EOF; online orchestration may recover it.
     public var playbackError: String?
+    /// 当前音频流的真实规格（编码/比特率/采样率/声道/容器）。内核未报告时为 nil，
+    /// 界面据此决定显示哪些字段，缺值不编造。
+    public var audioTrackInfo: AudioTrackInfo?
+    /// 应用音量（0–100）。这是「应用自己设定的音量」这一应用状态，不是对设备输出的测量：
+    /// libmpv 不回读，本值由本类的 setVolume 维护。界面音量条绑它，缺省为 100（libmpv 默认），
+    /// 应用启动后会以用户设置（启动音量）覆盖。
+    public var volume: Double
+    /// 是否已启用「播完当前曲暂停」。界面据此显示该开关的当前状态。
+    ///
+    /// 注意：这是内存态、不随现场落库 —— 该开关属于「本次操作意图」，退出后回到默认关闭，
+    /// 与队列/播放模式（用户长期偏好）的持久化范围不同。
+    public var pauseAfterCurrent: Bool
 
     public init(
         currentTrack: Track?,
@@ -62,7 +86,10 @@ public struct PlaybackSnapshot: Equatable, Sendable {
         duration: Double,
         isCoreIdle: Bool,
         queue: QueueState,
-        playbackError: String? = nil
+        playbackError: String? = nil,
+        audioTrackInfo: AudioTrackInfo? = nil,
+        volume: Double = PlaybackVolumeDefaults.volume,
+        pauseAfterCurrent: Bool = false
     ) {
         self.currentTrack = currentTrack
         self.isPaused = isPaused
@@ -71,6 +98,9 @@ public struct PlaybackSnapshot: Equatable, Sendable {
         self.isCoreIdle = isCoreIdle
         self.queue = queue
         self.playbackError = playbackError
+        self.audioTrackInfo = audioTrackInfo
+        self.volume = volume
+        self.pauseAfterCurrent = pauseAfterCurrent
     }
 }
 
@@ -116,6 +146,11 @@ public final class PlaybackStateStore: @unchecked Sendable {
     /// 停在旧值（界面文案、媒体键、现场落库一起卡住）。折叠时序的语义没有变，变的只是
     /// 「谁来驱动」：从「等任务被调度」变成「状态产生方直接调用」。
     private var engineState: PlayerEngineState
+    /// 缓存的音量值（0–100）。引擎不提供回读，界面音量条需要一个可发布、可回读的应用音量；
+    /// 见 PlaybackSnapshot.volume 与 setVolume(_:)。
+    private var volumeValue: Double = PlaybackVolumeDefaults.volume
+    /// 是否已在本次播放会话里启用「播完当前曲暂停」。见 setPauseAfterCurrent 与 PlaybackSnapshot。
+    private var pauseAfterCurrentValue = false
     /// 队列状态流的消费任务，deinit 时取消。
     private var observerTasks: [Task<Void, Never>] = []
     /// 引擎状态的同步订阅令牌，deinit 时取消。
@@ -150,7 +185,10 @@ public final class PlaybackStateStore: @unchecked Sendable {
             position: initialEngineState.position,
             duration: initialEngineState.duration,
             isCoreIdle: initialEngineState.isCoreIdle,
-            queue: queue.state
+            queue: queue.state,
+            audioTrackInfo: initialEngineState.audioTrackInfo,
+            volume: volumeValue,
+            pauseAfterCurrent: pauseAfterCurrentValue
         )
         startObserving()
     }
@@ -195,6 +233,8 @@ public final class PlaybackStateStore: @unchecked Sendable {
     public var duration: Double { snapshot.duration }
     /// Readiness is independent of core-idle (which also includes pause/buffering).
     public var hasLoadedFile: Bool { engine.hasLoadedFile }
+    /// 当前音频流规格（编码/比特率/采样率/声道/容器）；内核未报告时为 nil。
+    public var audioTrackInfo: AudioTrackInfo? { snapshot.audioTrackInfo }
     /// 队列快照。
     public var queueState: QueueState { snapshot.queue }
 
@@ -416,6 +456,65 @@ public final class PlaybackStateStore: @unchecked Sendable {
         publish()
     }
 
+    /// 跳到队列中指定下标的曲目并开始播放。
+    ///
+    /// 与 playTrack 的区别：这是「在已知队列里的定位」，不按 id 查找、不会把不在队列里的曲目追加进来；
+    /// 下标越界时不改变任何状态（只是重新发布当前快照）。队列弹层的「点某一首播」走这条路径。
+    public func jump(toQueueIndex index: Int) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        guard queue.jump(to: index) != nil else {
+            publish()
+            return
+        }
+        lock.lock()
+        shouldPlayCurrent = true
+        lock.unlock()
+        loadCurrent()
+    }
+
+    /// 从队列移除指定下标的曲目。
+    ///
+    /// 索引语义由 QueueManager 负责（移除当前曲后选中落到同序号的下一首；移除末尾钳位；清空则无当前曲）。
+    /// 本方法只补上**引擎侧**的后果：
+    ///   - 移除的不是当前曲 → 队列内容变了、播放不受影响，仅发布快照；
+    ///   - 移除的是当前曲 → 当前曲换成了别人，必须把新的当前曲加载进引擎并继续播放；
+    ///   - 队列被清空 → 停止引擎并清掉「正在播的那一首」的在线请求等运行时标记（与 stop 同一条清理）。
+    public func removeFromQueue(at index: Int) {
+        loadLock.lock()
+        defer { loadLock.unlock() }
+        let before = queue.state
+        guard before.tracks.indices.contains(index) else {
+            publish()
+            return
+        }
+        let wasCurrent = before.currentIndex == index
+        guard queue.remove(at: index) != nil else {
+            publish()
+            return
+        }
+        guard let current = queue.currentTrack else {
+            lock.lock()
+            onlineRequestID = nil
+            activeMediaURL = nil
+            shouldPlayCurrent = false
+            playbackArmed = false
+            pendingRestore = nil
+            lock.unlock()
+            stopEngine()
+            publish()
+            return
+        }
+        if wasCurrent {
+            lock.lock()
+            shouldPlayCurrent = true
+            lock.unlock()
+            load(current)
+        } else {
+            publish()
+        }
+    }
+
     // MARK: - 命令：恢复现场（M3-T3）
 
     /// 恢复退出时的现场：整体采纳队列、加载当前曲，并把引擎移到保存的进度。
@@ -483,13 +582,61 @@ public final class PlaybackStateStore: @unchecked Sendable {
         (engine as? MPVEngine)?.applyAudioEffects(settings)
     }
 
-    /// 设置音量（mpv 量程 0–100，可超过 100）。引擎不提供回读，本类不做缓存。
+    /// 设置应用音量（mpv 量程 0–100，可超过 100）。
+    ///
+    /// 引擎不提供回读，本类缓存最后一次设定值并随快照发布，界面音量条据此显示与回读。
+    /// 值先夹到 0–100 再下发：越界值交给 libmpv 会被拒绝或产生意外的响度，夹取是这里唯一的合法化点。
     public func setVolume(_ volume: Double) {
+        let clamped = volume.isFinite ? min(100, max(0, volume)) : PlaybackVolumeDefaults.volume
+        lock.lock()
+        volumeValue = clamped
+        lock.unlock()
         do {
-            try engine.setVolume(volume)
+            try engine.setVolume(clamped)
         } catch {
             Log.player.error("PlaybackStateStore 设置音量失败：\(error.localizedDescription)")
         }
+        publish()
+    }
+
+    /// 只把音量下发给引擎，不改动缓存的「应用音量」，也不发布快照。
+    ///
+    /// 供淡入淡出这类**瞬时**音量包络使用：它们逐帧改引擎音量以产生渐变，若同时改写应用音量，
+    /// 界面音量条会跟着包络乱跳，用户随后松手时也会以一个中间值覆盖自己设定的音量。
+    /// 因此瞬时包络与用户音量分成两条路径，只有用户/启动音量走 setVolume(_:)。
+    func setTransientVolume(_ volume: Double) {
+        let clamped = volume.isFinite ? min(100, max(0, volume)) : 0
+        do {
+            try engine.setVolume(clamped)
+        } catch {
+            Log.player.error("PlaybackStateStore 设置瞬时音量失败：\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - 命令：播完当前曲暂停
+
+    /// 切换「播完当前曲暂停」。
+    ///
+    /// 语义（对齐 Android 版「播放完当前歌曲后暂停」）：只在本曲自然播完（EOF）时生效一次 ——
+    /// 不因用户手动切歌/上一首/下一首触发，也不打断正在播放的当前曲。触发时把队列当前曲停在
+    /// 你听到的位置（保持在当前曲上、不卸载、不推进），随后开关自动关闭（一次性，不常驻）。
+    public func setPauseAfterCurrent(_ enabled: Bool) {
+        lock.lock()
+        pauseAfterCurrentValue = enabled
+        lock.unlock()
+        publish()
+    }
+
+    /// 当前是否启用了「播完当前曲暂停」。
+    public var isPauseAfterCurrentEnabled: Bool { snapshot.pauseAfterCurrent }
+
+    /// 若已启用一次性暂停，则消费它并返回 true（并清除标记）。
+    /// EOF 推进路径在决定是否切下一首之前先问一次；不启用时返回 false，不改变既有自动推进。
+    /// 已持有 lock。
+    private func consumePauseAfterCurrentLocked() -> Bool {
+        guard pauseAfterCurrentValue else { return false }
+        pauseAfterCurrentValue = false
+        return true
     }
 
     /// 跳转到绝对位置（秒）。
@@ -540,7 +687,14 @@ public final class PlaybackStateStore: @unchecked Sendable {
         if state.hasEnded {
             if playbackArmed, shouldPlayCurrent, stillCurrent {
                 playbackArmed = false
-                advanceTo = advanceAfterEndLocked()
+                // 一次性暂停优先于自动推进：用户勾了「播完当前曲暂停」，本曲自然结束后应停在当前曲，
+                // 不切下一首（也不重播）。消费掉这个一次性标记后，后续 EOF 恢复成正常的队列推进。
+                if consumePauseAfterCurrentLocked() {
+                    shouldPlayCurrent = false
+                    Log.player.info("PlaybackStateStore：播完当前曲，按一次性暂停停在当前曲")
+                } else {
+                    advanceTo = advanceAfterEndLocked()
+                }
             }
         } else if state.hasLoadedFile, stillCurrent {
             playbackArmed = true
@@ -670,7 +824,10 @@ public final class PlaybackStateStore: @unchecked Sendable {
             duration: engineState.duration,
             isCoreIdle: engineState.isCoreIdle,
             queue: queueSnapshot,
-            playbackError: engineState.playbackError
+            playbackError: engineState.playbackError,
+            audioTrackInfo: engineState.audioTrackInfo,
+            volume: volumeValue,
+            pauseAfterCurrent: pauseAfterCurrentValue
         )
     }
 

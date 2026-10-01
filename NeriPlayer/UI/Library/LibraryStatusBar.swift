@@ -24,7 +24,7 @@ struct LibraryStatusBar: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Text("共 \(viewModel.tracks.count) 首")
+            Text("共 \(viewModel.sourceTracks.count) 首")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if !viewModel.favorites.isEmpty {

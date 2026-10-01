@@ -57,5 +57,7 @@ public final class PlaybackFadeController: @unchecked Sendable {
 }
 
 extension PlaybackStateStore: PlaybackVolumeSink {
-    public func setPlaybackVolume(_ volume: Double) { setVolume(volume) }
+    /// 淡入淡出走瞬时路径（setTransientVolume），不改写用户的应用音量，也不发布快照 ——
+    /// 逐帧的包络值不应被界面音量条回读，更不该在用户松手后覆盖其设定。
+    public func setPlaybackVolume(_ volume: Double) { setTransientVolume(volume) }
 }

@@ -2,6 +2,7 @@
 // M5: account cookies stay in Keychain, never UserDefaults or playback snapshots.
 
 import Foundation
+import CryptoKit
 import Security
 
 public protocol OnlineCredentialStore: Sendable {
@@ -71,23 +72,51 @@ public final class OnlineSessionStore: @unchecked Sendable {
     }
     public func saveCookieHeader(_ value: String, for source: MusicSource) throws {
         let normalized = try Self.normalizedCookieHeader(value, source: source)
+        let oldContext = try? cacheContext(for: source)
+        let newContext = Self.cacheContext(normalized)
         lock.lock()
-        defer { lock.unlock() }
-        try credentials.write(Data(normalized.utf8), account: source.rawValue)
+        do {
+            try credentials.write(Data(normalized.utf8), account: source.rawValue)
+        } catch {
+            lock.unlock()
+            throw error
+        }
         versions[source] = UUID()
+        lock.unlock()
+        if oldContext != newContext {
+            NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: ["source": source])
+        }
         Log.net.info("在线会话已保存到 Keychain：\(source.rawValue, privacy: .public)")
     }
     public func clear(_ source: MusicSource) throws {
         lock.lock()
-        defer { lock.unlock() }
-        try credentials.remove(account: source.rawValue)
+        do {
+            try credentials.remove(account: source.rawValue)
+        } catch {
+            lock.unlock()
+            throw error
+        }
         versions[source] = UUID()
+        lock.unlock()
+        NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: ["source": source])
         Log.net.info("在线会话已清除：\(source.rawValue, privacy: .public)")
     }
     public func version(for source: MusicSource) -> UUID? {
         lock.lock()
         defer { lock.unlock() }
         return versions[source]
+    }
+
+    static let didChange = Notification.Name("NeriPlayer.onlineSessionChanged")
+
+    // Only a digest leaves Keychain; it is stable across launches and never logged.
+    func cacheContext(for source: MusicSource) throws -> String {
+        guard let cookie = try cookieHeader(for: source), !cookie.isEmpty else { return "anonymous" }
+        return Self.cacheContext(cookie)
+    }
+
+    private static func cacheContext(_ cookie: String) -> String {
+        SHA256.hash(data: Data(cookie.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     // Accept a raw Cookie header or a Netscape cookie export; filter exports by platform domain and expiry.

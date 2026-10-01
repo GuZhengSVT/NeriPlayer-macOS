@@ -177,6 +177,42 @@ public actor BilibiliClient: OnlineMusicClient {
         throw OnlineError.unavailable("收藏夹分页超出限制")
     }
 
+    public func collectionArtwork(in collection: OnlineCollection) async throws -> URL? {
+        guard collection.source == .bilibili, let id = BilibiliParsing.positiveID(collection.sourceID) else {
+            throw OnlineError.invalidInput("无效的 Bilibili 收藏夹")
+        }
+        // Android obtains folder metadata separately: list-all often omits the cover.
+        let folder = try await api("/x/v3/fav/folder/info", parameters: ["media_id": id])
+        if let cover = ArtworkURLNormalizer.normalized(folder["cover"] as? String) { return cover }
+        let data = try await api("/x/v3/fav/resource/list", parameters: [
+            "media_id": id, "pn": "1", "ps": "20", "order": "mtime", "platform": "web"
+        ])
+        let info = data["info"] as? [String: Any]
+        let first = (data["medias"] as? [[String: Any]])?.first
+        return ArtworkURLNormalizer.normalized(info?["cover"] as? String)
+            ?? ArtworkURLNormalizer.normalized(first?["cover"] as? String)
+    }
+
+    public func collectionPage(in collection: OnlineCollection, cursor: String?) async throws -> OnlineCollectionPage {
+        guard collection.source == .bilibili, let id = BilibiliParsing.positiveID(collection.sourceID),
+              let page = Int(cursor ?? "1"), (1...1000).contains(page) else { throw OnlineError.invalidInput("无效的收藏夹页码") }
+        let data = try await api("/x/v3/fav/resource/list", parameters: ["media_id": id, "pn": String(page), "ps": "20", "order": "mtime", "platform": "web"])
+        let items = data["medias"] as? [[String: Any]] ?? []
+        let songs = items.compactMap { item -> SongData? in
+            guard BilibiliParsing.integer(item["type"]) == 2,
+                  let bvid = item["bvid"] as? String ?? item["bv_id"] as? String,
+                  let identity = try? BilibiliVideoIdentity(sourceID: bvid) else { return nil }
+            let upper = item["upper"] as? [String: Any]
+            return SongData(source: .bilibili, sourceID: identity.sourceID, title: BilibiliParsing.plainText(item["title"] as? String ?? ""),
+                            artist: upper?["name"] as? String ?? "", album: collection.title,
+                            duration: (item["duration"] as? NSNumber)?.doubleValue,
+                            artworkURL: BilibiliParsing.httpURL(item["cover"] as? String), pageURL: identity.pageURL)
+        }
+        let more = data["has_more"] as? Bool == true
+        if more && items.isEmpty { throw OnlineError.invalidResponse }
+        return OnlineCollectionPage(songs: songs, nextCursor: more ? String(page + 1) : nil)
+    }
+
     /// The protocol has no folder argument, so additions target the first user-created folder.
     /// Removal uses only folders returned by favoured=true, leaving unrelated subscriptions intact.
     public func setFavorite(_ song: SongData, favorite: Bool) async throws {

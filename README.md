@@ -1,6 +1,6 @@
 # NeriPlayer macOS
 
-参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前发布版本为 **0.9.0**，与 Android 版版本号独立。
+参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前为开发中的 **0.0.9**，与 Android 版版本号独立；尚未发布正式 Release 编译版本。
 
 M9 已提供可分发的 `.app/.dmg` 打包路径：默认输出 unsigned/ad-hoc 包；配置 Developer ID 和 notarytool profile 后由同一脚本完成签名与公证。它仍不是 Android 版的完整替代，平台差异见下文。
 
@@ -9,12 +9,14 @@ M9 已提供可分发的 `.app/.dmg` 打包路径：默认输出 unsigned/ad-hoc
 - 本地目录扫描、元数据/封面索引、歌曲/歌手/专辑浏览、搜索、收藏及歌单。
 - libmpv 本地播放、队列、循环/随机模式、媒体键与 Now Playing 接入。
 - 播放现场、历史及统计的数据库层，外观与启动播放偏好。
-- 首页提供当前队列的继续播放、探索/媒体库/下载快捷入口、当前平台最多六首在线推荐和本地媒体库数量概览。
-- 主窗口底部常驻播放器控制栏：当前曲目、在线封面、上一首/播放暂停/下一首、只读进度、歌词入口和媒体库入口；空队列时隐藏。
+- 首页按 Android 分区组织网易云私人雷达、每日推荐、私人 FM、榜单、推荐/精品/热门/ACG 歌单及 YouTube Music 首页栏；各分区独立加载并保留缓存。
+- 搜索为第二个页面：平台歌曲搜索、网易云歌单/专辑/歌手搜索、YouTube 创作者搜索、搜索历史与歌曲/歌单链接识别。
+- 媒体库分为本地、收藏、网易云、Bilibili、YouTube 五栏；收藏页包含歌曲与本机收藏的歌单/专辑，各平台浏览状态独立。
+- 主窗口底部播放栏保留顶部可拖动进度、曲目信息、同步歌词、实际音频规格、音量、模式、收藏/歌单及桌面歌词；队列按钮打开当前播放队列，窄窗口的辅助控制收进更多菜单。
 - 设置采用分类列表与独立详情页，分为账号、通用、外观与个性化、播放与音质、歌词、网络与下载、存储与媒体库、备份与同步、一起听、关于。
 - LRC、增强 LRC、YRC、TTML、Lyricify SYL、KRC 文本解析与导出；本地同名歌词、显式网易云歌曲 ID、播放同步/偏移、逐行/逐字高亮和 1080px PNG 歌词卡片。
 
-- 网易云、Bilibili、YouTube Music 统一搜索与在线播放；三源探索页、歌单/专辑详情、网易云/B站 QR 登录入口、YTM Cookie 导入及 Keychain 会话存储。网易云歌单和 Bilibili 收藏夹在平台没有返回封面时，会使用第一首歌曲或第一个视频的封面作为兜底，并在打开详情后回填列表封面。
+- 网易云、Bilibili、YouTube Music 统一搜索与在线播放；平台媒体库与歌单/专辑详情、网易云/B站 QR 登录入口、YTM Cookie 导入及 Keychain 会话存储。封面统一缓存；Bilibili 优先补取收藏夹元信息，缺少封面时才尝试视频封面。
 - 在线队列按稳定歌曲标识恢复；音源刷新、候选评分换源、失败跳过以及返回本地播放的取消隔离。
 - 下载队列、Range/ETag 断点续传、非加密 HLS 点播续传、下载页、播放缓存命中、存储分类清理和 TagLib 标签收尾。
 - GitHub/WebDAV 元数据同步、Android 2.0 快照兼容读取、歌单/收藏/历史/统计合并、在途本地修改保护，以及本机设置和数据库元数据备份恢复。
@@ -35,12 +37,12 @@ swift run NeriPlayer
 创建 unsigned DMG（需要已布置 `Vendor/mpv`）：
 
 ```sh
-VERSION=0.9.0 BUILD_NUMBER=1 Tools/package.sh
+VERSION=0.0.9 BUILD_NUMBER=1 Tools/package.sh
 ```
 
 发布签名与公证需额外设置 `SIGNING_IDENTITY`、`NOTARY_PROFILE`；脚本会把可发现的 Homebrew 动态库复制到 app 内并改写为 `@rpath`。没有证书时 unsigned/ad-hoc 输出仍可用于本机和干净机器的安装验收。
 
-`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本会清空 `dist` 后生成 `dist/NeriPlayer.app` 与 `dist/NeriPlayer-0.9.0.dmg`。打包产物不提交到源码仓库。
+`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本会清空 `dist` 后生成 `dist/NeriPlayer.app` 与 `dist/NeriPlayer-0.0.9.dmg`。打包产物不提交到源码仓库。
 
 在窗口切换到媒体库，选择导入目录，再播放歌曲。可选校验：
 
@@ -87,7 +89,8 @@ macOS 版明确未覆盖或不等价的 Android 能力：Android Service/WorkMan
 - [歌词移植笔记](docs/m4-lyrics-notes.md)、[在线音源笔记](docs/m5-online-notes.md)、[M5 验收记录](docs/acceptance/m5.md)、[M6 验收记录](docs/acceptance/m6.md) 与 [音效 ADR](docs/audio-effects-adr.md)。
 - [同步与备份笔记](docs/m7-sync-notes.md)、[M7 验收记录](docs/acceptance/m7.md)、[同步快照 JSON Schema](docs/sync-snapshot.schema.json)。
 - [M8 验收记录](docs/acceptance/m8.md)：桌面播放器、Metal、音效、ListenTogether 与人工验收边界。
-- [首页、底部播放器与分类设置记录](docs/acceptance/desktop-ui.md)：本次界面实现、封面兜底行为、验证范围与当前限制。
+- [播放栏与页面重做验收](docs/acceptance/player-pages-2026-10-02.md)、[设置切页性能记录](docs/acceptance/settings-navigation-2026-10-02.md)：最新范围、验证与限制。
+- [早期桌面 UI 记录](docs/acceptance/desktop-ui.md)：2026-10-01 的历史状态，后续变更以最新验收为准。
 - [历史验收记录](docs/acceptance/)：保留既有阶段记录；本轮无法独立确认其中所有截图、压力轮数和真机结论。
 
 ## 上游与来源

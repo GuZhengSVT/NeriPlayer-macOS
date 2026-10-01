@@ -67,6 +67,33 @@ final class OnlineHTTPTests: XCTestCase {
         XCTAssertEqual(songs.first?.sourceID, "123")
         XCTAssertEqual(songs.first?.duration, 180)
     }
+    func testNeteaseCatalogSearchMapsCollectionsAndArtistTracks() async throws {
+        let host = UUID().uuidString.lowercased() + ".invalid"
+        defer { OnlineMockRouter.remove(host) }
+        OnlineMockRouter.set(host) { request in
+            if request.url?.path == "/weapi/v1/artist/7" {
+                return .init(json: #"{"code":200,"hotSongs":[{"id":1,"name":"Artist song","ar":[{"name":"Artist"}]}]}"#)
+            }
+            XCTAssertEqual(request.url?.path, "/eapi/cloudsearch/pc")
+            return .init(json: """
+            {"code":200,"result":{
+              "playlists":[{"id":123,"name":"Playlist","creator":{"nickname":"Creator"},"coverImgUrl":"https://img.example/cover.jpg"}],
+              "albums":[{"id":"456","name":"Album","artist":{"name":"Artist"}}],
+              "artists":[{"id":7,"name":"Artist"}]}}
+            """)
+        }
+        let client = NeteaseClient(session: session(), sessions: OnlineSessionStore(credentials: OnlineMemoryCredentials()),
+                                   baseURL: try XCTUnwrap(URL(string: "https://" + host)))
+        let playlists = try await client.searchCatalog(query: "Test", category: .playlists, page: 1)
+        XCTAssertEqual(playlists.first?.collection?.kind, .playlist)
+        XCTAssertEqual(playlists.first?.subtitle, "Creator")
+        let albums = try await client.searchCatalog(query: "Test", category: .albums, page: 1)
+        XCTAssertEqual(albums.first?.sourceID, "456")
+        XCTAssertEqual(albums.first?.collection?.kind, .album)
+        let songs = try await client.artistSongs(id: "7")
+        XCTAssertEqual(songs.first?.title, "Artist song")
+    }
+
     func testNeteaseRefusesTrialAudioAndMapsQRStates() async throws {
         let host = UUID().uuidString.lowercased() + ".invalid"
         defer { OnlineMockRouter.remove(host) }

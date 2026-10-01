@@ -92,6 +92,16 @@ public enum MPVProperty: String, Sendable, CaseIterable {
     case eofReached = "eof-reached"
     /// 播放核心是否空闲（无文件加载时为 true）。
     case coreIdle = "core-idle"
+    /// 当前音频流的实际比特率（bit/s）。部分格式/流不报告时该属性不可用。
+    case audioBitrate = "audio-bitrate"
+    /// 实际输出采样率（Hz）。
+    case audioSamplerate = "audio-params/samplerate"
+    /// 实际声道数。
+    case audioChannels = "audio-params/channel-count"
+    /// 音频编码名（例如 "mp3" / "flac" / "pcm_s24be"）。
+    case audioCodecName = "audio-codec-name"
+    /// 容器格式（例如 "mp3" / "flac" / "aiff"）。
+    case fileFormat = "file-format"
 
     /// 观察该属性时使用的格式。
     public var format: MPVFormat {
@@ -100,6 +110,10 @@ public enum MPVProperty: String, Sendable, CaseIterable {
             return .double
         case .paused, .eofReached, .coreIdle:
             return .flag
+        case .audioBitrate, .audioSamplerate, .audioChannels:
+            return .int64
+        case .audioCodecName, .fileFormat:
+            return .string
         }
     }
 }

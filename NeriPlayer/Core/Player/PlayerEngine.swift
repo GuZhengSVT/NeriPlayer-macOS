@@ -43,9 +43,15 @@ public struct PlayerEngineState: Equatable, Sendable {
     public var hasLoadedFile: Bool
     /// A backend file failure, distinct from natural EOF and pause/buffering.
     public var playbackError: String?
+    /// 当前音频流的真实规格（编码/比特率/采样率/声道/容器）。内核未报告时为空。
+    ///
+    /// 加在引擎状态里而不是让界面去读引擎：规格是随文件加载产生的、与 currentURL 同生命周期的事件
+    /// 折叠结果，放进同一份快照才能保证「换歌 → 规格跟着换」，也不会让界面持有引擎引用。
+    public var audioTrackInfo: AudioTrackInfo?
 
     public init(currentURL: URL?, isPaused: Bool, position: Double, duration: Double, isCoreIdle: Bool,
-                hasEnded: Bool = false, hasLoadedFile: Bool? = nil, playbackError: String? = nil) {
+                hasEnded: Bool = false, hasLoadedFile: Bool? = nil, playbackError: String? = nil,
+                audioTrackInfo: AudioTrackInfo? = nil) {
         self.currentURL = currentURL
         self.isPaused = isPaused
         self.position = position
@@ -54,6 +60,7 @@ public struct PlayerEngineState: Equatable, Sendable {
         self.hasEnded = hasEnded
         self.hasLoadedFile = hasLoadedFile ?? (currentURL != nil && !isCoreIdle)
         self.playbackError = playbackError
+        self.audioTrackInfo = audioTrackInfo
     }
 
     /// 未加载任何内容的初始状态。
@@ -115,6 +122,11 @@ public protocol PlayerEngine: AnyObject, Sendable {
     var isCoreIdle: Bool { get }
     var hasEnded: Bool { get }
     var hasLoadedFile: Bool { get }
+    /// 当前音频流的真实规格；后端未采集或未报告时为 nil。
+    ///
+    /// 协议给出默认实现（返回 nil），因此新增该能力不会迫使既有后端与测试替身改动；
+    /// 只有真正能读到内核属性的后端（MPVEngine）覆盖它。
+    var audioTrackInfo: AudioTrackInfo? { get }
 
     /// 加载并替换当前文件（单文件播放，无队列）。
     func load(url: URL) throws
@@ -161,6 +173,7 @@ public extension PlayerEngine {
 
     var hasEnded: Bool { false }
     var hasLoadedFile: Bool { currentURL != nil && !isCoreIdle }
+    var audioTrackInfo: AudioTrackInfo? { nil }
 
     /// 由五个只读属性组合出的当前快照，便于上层一次性读取。
     var state: PlayerEngineState {
@@ -171,7 +184,8 @@ public extension PlayerEngine {
             duration: duration,
             isCoreIdle: isCoreIdle,
             hasEnded: hasEnded,
-            hasLoadedFile: hasLoadedFile
+            hasLoadedFile: hasLoadedFile,
+            audioTrackInfo: audioTrackInfo
         )
     }
 }

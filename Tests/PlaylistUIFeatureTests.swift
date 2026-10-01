@@ -40,6 +40,26 @@ final class PlaylistUIFeatureTests: XCTestCase {
 
     // MARK: - 夹具
 
+    /// 新建歌单返回**实际创建的那个**，且能把曲目原子地加进去。
+    ///
+    /// 防回归：当前播放栏为在线曲新建歌单时用返回的 id 入库入单；如果实现退化成「用名字回查」，
+    /// 在已有同名歌单时会误加到旧歌单。这里通过「已存在同名歌单，再新建一个并加入曲目」断言
+    /// 曲目落在**新**歌单上，而不是按名字命中的那一个。
+    func testCreatePlaylistReturnsCreatedInstance() throws {
+        let track = try insertTrack("Alpha", artist: "Alice")
+        let viewModel = LibraryViewModel(database: provider)
+        viewModel.load()
+
+        // 先有一个同名歌单：名字回查会命中它。
+        let repository = PlaylistRepository(provider)
+        let existing = try repository.create(name: "同名")
+
+        let created = try XCTUnwrap(viewModel.createPlaylist(named: "同名", adding: track))
+        XCTAssertNotEqual(created.id, existing.id, "应新建一个不同的歌单，而不是复用同名旧歌单")
+        XCTAssertEqual(try repository.entries(playlistId: created.id).count, 1, "曲目应落在新歌单里")
+        XCTAssertEqual(try repository.entries(playlistId: existing.id).count, 0, "旧同名歌单不应被写入")
+    }
+
     /// 落一条曲目到临时库，返回其对外值类型。
     @discardableResult
     private func insertTrack(_ title: String, artist: String? = nil, album: String? = nil) throws -> LibraryTrack {

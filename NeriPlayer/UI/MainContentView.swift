@@ -1,15 +1,13 @@
 // MainContentView.swift
-// M0-T6：主窗口 + 侧栏导航骨架。左侧 Sidebar 列出五个顶层导航项（首页/探索/媒体库/下载/设置），
-// 右侧详情区渲染选中项对应的占位视图。本任务只做骨架，详情区不含任何业务功能，
-// 真实内容由后续里程碑任务替换。
-// M2-T5：媒体库 tab 的占位视图替换为 LibraryView（数据来自 AppState.libraryViewModel）。
+// 主窗口：五个顶层导航项（首页/搜索/媒体库/下载/设置）与应用级底部播放栏。
+// explore 的持久化值保留，界面显示为搜索；平台歌单在媒体库独立分栏管理。
 //
 // 选中项持久化：通过 SettingsStore 的 SettingsKeys.lastSelectedTab 保存/恢复上次选中的 tab；
 // 存储值缺失或无法识别时回落到 .home。写回放在 Binding 的 setter 里（而非 onChange），
 // 这样在 macOS 13 部署目标下不依赖 onChange(of:initial:) 的新签名，也不产生弃用警告。
 //
 // M2-T8/M8：窗口底部挂一条跨 tab 常驻的浮动播放器，统一承载当前曲目、进度与播放控制。
-// 播放是应用级状态，切 tab 不应让控制栏重建；控制栏点击歌词或歌单入口时再跳转到对应页面。
+// 播放是应用级状态，切 tab 不重建会话；队列在播放栏就地展开。
 
 import SwiftUI
 
@@ -29,7 +27,7 @@ enum MainTab: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .home: return "首页"
-        case .explore: return "探索"
+        case .explore: return "搜索"
         case .library: return "媒体库"
         case .downloads: return "下载"
         case .settings: return "设置"
@@ -40,7 +38,7 @@ enum MainTab: String, CaseIterable, Identifiable, Hashable {
     var systemImage: String {
         switch self {
         case .home: return "house"
-        case .explore: return "safari"
+        case .explore: return "magnifyingglass"
         case .library: return "music.note.list"
         case .downloads: return "arrow.down.circle"
         case .settings: return "gearshape"
@@ -55,7 +53,7 @@ enum MainTab: String, CaseIterable, Identifiable, Hashable {
 
 // MARK: - 主视图
 
-/// 主窗口根视图：NavigationSplitView 侧栏 + 占位详情区。
+/// 主窗口根视图。
 struct MainContentView: View {
     @EnvironmentObject private var appState: AppState
 
@@ -63,6 +61,8 @@ struct MainContentView: View {
     private let store: SettingsStore
     @State private var selection: MainTab
     @State private var lyricsPresented = false
+    @State private var libraryPage: MediaLibraryPage = .local
+    @StateObject private var searchPageModel = SearchPageModel()
 
     /// 构造时即读出上次选中的 tab，避免首帧先显示 home 再跳转。
     init(store: SettingsStore = .shared) {
@@ -72,7 +72,7 @@ struct MainContentView: View {
 
     var body: some View {
         // 上下两段：主内容（侧栏 + 详情）占满剩余高度，播放状态条固定在窗口底部。
-        // 状态条自身在「无当前曲」时不渲染，VStack 的高度差正好把主内容补满。
+        // 无当前曲时仍保留播放栏和进度轨道，避免加载时界面跳动。
         ZStack {
             HyperBackgroundView(dark: appState.settingsViewModel?.appearance == .dark)
                 .ignoresSafeArea()
@@ -83,11 +83,8 @@ struct MainContentView: View {
             } detail: {
                 detail
             }
-            // 走 selectionBinding 而不是直接改 @State：点击状态条同样要把 tab 写进设置存储，
-            // 否则重启后会回到上一次用侧栏选的 tab，而不是这条状态条带来的一次跳转。
             if let coordinator = appState.onlinePlayback { OnlinePlaybackStatusView(coordinator: coordinator) }
-            FloatingPlayerBar(onLyrics: { lyricsPresented = true },
-                              onOpenQueue: { selectionBinding.wrappedValue = .library })
+            FloatingPlayerBar(onLyrics: { lyricsPresented = true })
         }
         .frame(minWidth: 720, minHeight: 480)
         .sheet(isPresented: $lyricsPresented) {
@@ -100,28 +97,33 @@ struct MainContentView: View {
         }
     }
 
-    /// 详情区。媒体库与设置分派到真实视图，其余 tab 仍是占位。
+    /// 详情区。初始化失败时保留占位提示。
     @ViewBuilder
     private var detail: some View {
-        if selection == .home, let online = appState.onlineViewModel, let library = appState.libraryViewModel {
-            HomeView(onlineViewModel: online, libraryViewModel: library,
+        if selection == .home, let online = appState.onlineViewModel, let home = appState.homeViewModel {
+            HomeView(onlineViewModel: online, homeViewModel: home, libraryViewModel: appState.libraryViewModel,
                      onExplore: { selectionBinding.wrappedValue = .explore },
                      onLibrary: { selectionBinding.wrappedValue = .library },
-                     onDownloads: { selectionBinding.wrappedValue = .downloads })
+                     onDownloads: { selectionBinding.wrappedValue = .downloads },
+                     onOpenCollection: openCollection)
         } else if selection == .library, let viewModel = appState.libraryViewModel {
-            LibraryView(viewModel: viewModel)
+            MediaLibraryView(viewModel: viewModel, selection: $libraryPage)
         } else if selection == .explore, let model = appState.onlineViewModel {
-            OnlineExploreView(viewModel: model, enqueueDownload: appState.downloadViewModel?.enqueue,
-                              addToLocalLibrary: appState.syncViewModel.map { model in
-                                  { song, playlist, favorite in model.addToLibrary(song, playlistID: playlist, favorite: favorite) }
-                              }, localPlaylists: appState.libraryViewModel?.playlists ?? [])
+            SearchView(viewModel: model, pageModel: searchPageModel, onOpenCollection: openCollection)
         } else if selection == .downloads, let downloads = appState.downloadViewModel {
             DownloadsView(viewModel: downloads)
         } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
             SettingsView(viewModel: settingsViewModel, syncViewModel: appState.syncViewModel,
                          audioEffectsViewModel: appState.audioEffectsViewModel,
                          listenTogetherViewModel: appState.listenTogetherViewModel,
-                         onlineViewModel: appState.onlineViewModel)
+                         onlineViewModel: appState.onlineViewModel,
+                         lyricsViewModel: appState.lyricsViewModel,
+                         onNavigate: { destination in
+                             switch destination {
+                             case .explore: selectionBinding.wrappedValue = .explore
+                             case .downloads: selectionBinding.wrappedValue = .downloads
+                             }
+                         })
         } else {
             PlaceholderDetailView(tab: selection, isSafeMode: appState.isSafeMode)
         }
@@ -148,6 +150,12 @@ struct MainContentView: View {
                 store.set(newValue.rawValue, for: SettingsKeys.lastSelectedTab)
             }
         )
+    }
+
+    private func openCollection(_ collection: OnlineCollection) {
+        libraryPage = MediaLibraryPage(source: collection.source)
+        appState.libraryOnlineModels[collection.source]?.selectCollection(collection)
+        selectionBinding.wrappedValue = .library
     }
 }
 

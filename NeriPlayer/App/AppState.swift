@@ -33,6 +33,8 @@ public final class AppState: ObservableObject {
     /// M4: one lyrics adapter shared across windows and navigation.
     @Published private(set) var lyricsViewModel: LyricsViewModel?
     @Published private(set) var onlineViewModel: OnlineViewModel?
+    @Published private(set) var libraryOnlineModels: [MusicSource: OnlineViewModel] = [:]
+    @Published private(set) var homeViewModel: HomeViewModel?
     @Published private(set) var onlinePlayback: OnlinePlaybackCoordinator?
     private var playbackCache: PlaybackAudioCache?
     @Published private(set) var downloadViewModel: DownloadViewModel?
@@ -179,6 +181,13 @@ public final class AppState: ObservableObject {
             onlineViewModel = nil
             Task { @MainActor in model.stop() }
         }
+        let libraryModels = Array(libraryOnlineModels.values)
+        libraryOnlineModels = [:]
+        Task { @MainActor in libraryModels.forEach { $0.stop() } }
+        if let model = homeViewModel {
+            homeViewModel = nil
+            Task { @MainActor in model.stop() }
+        }
         if let coordinator = onlinePlayback {
             onlinePlayback = nil
             Task { @MainActor in coordinator.stop() }
@@ -296,7 +305,21 @@ public final class AppState: ObservableObject {
             } catch { Log.net.error("播放缓存初始化失败：\(error.localizedDescription)") }
             onlinePlayback = OnlinePlaybackCoordinator(store: store, resolver: PlaybackResolver(clients: clients), searchManager: manager, cache: playbackCache)
         }
-        onlineViewModel = OnlineViewModel(clients: clients, sessions: sessions, store: playbackStore)
+        var pageCache: OnlineContentCache?
+        do {
+            let database = try DatabaseProvider()
+            try database.setupIfNeeded()
+            pageCache = OnlineContentCache(database: database)
+        } catch { Log.db.error("在线页面缓存初始化失败：\(error.localizedDescription)") }
+        let content = OnlineContentRepository(clients: clients, sessions: sessions, cache: pageCache)
+        onlineViewModel = OnlineViewModel(clients: clients, sessions: sessions, store: playbackStore, content: content, loadsBrowseContent: false)
+        libraryOnlineModels = Dictionary(uniqueKeysWithValues: MusicSource.allCases.map { source in
+            let model = OnlineViewModel(clients: clients, sessions: sessions, store: playbackStore, content: content)
+            model.configureLibrarySource(source)
+            model.loadsRecommendations = false
+            return (source, model)
+        })
+        homeViewModel = HomeViewModel(content: content, sessions: sessions)
     }
 
     // MARK: - Downloads (M6)

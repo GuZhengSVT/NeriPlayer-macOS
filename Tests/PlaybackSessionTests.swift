@@ -664,7 +664,7 @@ final class PlaybackSessionTests: XCTestCase {
         let applied = try upgraded.dbQueue.read { db in
             try upgraded.migrator.appliedIdentifiers(db)
         }
-        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5"])
+        XCTAssertEqual(Set(applied), ["v1", "v2", "v3", "v4", "v5", "v6"])
 
         let loaded = try XCTUnwrap(try PlayerStateRepository(upgraded).load())
         XCTAssertEqual(loaded.tracks.map(\.title), ["legacy-a", "legacy-b"])
