@@ -97,20 +97,27 @@ struct FloatingPlayerBar: View {
 
     // MARK: - 主行（左信息 / 中控制 / 右动作）
 
-    /// 三区布局：左右两侧都是同一个固定宽度，中间控制区因此落在**整窗水平中心**。
+    /// 三区布局：左右两侧各占剩余宽度的**一半**，中间控制区因此落在整窗水平中心。
+    ///
+    /// 为什么是 `maxWidth: .infinity` 而不是算出一个固定 sideWidth：
+    /// 固定宽度一旦遇到「算出来比窗口还窄」的情况（旧实现有 `max(120, …)` 下限），
+    /// 三区总宽就会超过窗口，左右两侧的内容被裁掉。交给 SwiftUI 分剩余空间后，
+    /// 两侧永远只会被压缩到 0 而不是溢出：左区左对齐、右区右对齐，中间固定宽度居中。
+    /// 中区给更高的 layoutPriority，保证被压缩的是两侧文字而不是进度条与传输组。
     private func mainRow(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
                          plan: PlayerBarLayoutPlan, width: CGFloat) -> some View {
-        // 左右等宽：中区中心 == 整窗中心。扣掉两侧的水平内边距，三区总宽才正好等于栏宽
-        // （否则左右区会把整条栏撑得比窗口更宽）。下限 120 只用于防御极窄窗口，
-        // 主窗口最小宽度 720 时左区仍有 186pt 放得下封面与曲名。
-        let sideWidth = max(120, (width - PlayerBarLayout.centerWidth - Self.horizontalPadding * 2) / 2)
         return HStack(spacing: 0) {
             informationRegion(store: store, snapshot: snapshot, plan: plan)
-                .frame(width: sideWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(0)
+                .clipped()
             centerRegion(store: store, snapshot: snapshot)
                 .frame(width: PlayerBarLayout.centerWidth)
+                .layoutPriority(1)
             actionsRegion(store: store, snapshot: snapshot, plan: plan)
-                .frame(width: sideWidth, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .layoutPriority(0)
+                .clipped()
         }
         // 栏高约等于封面高度（72）。用 minHeight 而不是固定 height：默认字号下正好 72，
         // 用户把播放器/歌词字号调到上限时文字不被裁掉，栏随之略长。
@@ -272,10 +279,10 @@ struct FloatingPlayerBar: View {
 
     // MARK: - 右区：模式 / 播完暂停 / 收藏 / 歌单 / 桌面歌词 / 队列 / 音量 / 更多
 
-    /// 右对齐、大小相等、间隔相等，不分组建：整组共用同一字号与同一间距（14）。
+    /// 右对齐、大小相等、间隔相等，不分组建：整组共用同一字号、同一间距与同一按钮尺寸。
     private func actionsRegion(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
                                plan: PlayerBarLayoutPlan) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: Self.actionSpacing) {
             if plan.isInline(.mode) { modeButton(store: store, snapshot: snapshot) }
             if plan.isInline(.pauseAfterCurrent) { pauseAfterCurrentButton(store: store, snapshot: snapshot) }
             if plan.isInline(.favorite), let library = appState.libraryViewModel {
@@ -288,12 +295,21 @@ struct FloatingPlayerBar: View {
             // 队列恒内联：它是打开真实队列列表的唯一入口。
             queueButton
             if plan.isInline(.volume) { volumeControl(store: store, snapshot: snapshot) }
-            // 更多菜单始终在：它同时承载「播完当前曲暂停」这类低频动作与音频信息，
-            // 若只在有控件被收起时才出现，宽窗下这些功能就没有入口。
-            moreMenu(store: store, snapshot: snapshot, plan: plan)
+            // 「更多」只在确有控件被收起时才出现 —— 它是一个溢出容器，不是常驻入口。
+            // 宽窗下所有控件都已内联，此时若还留着，用户点开只会看到音频信息，
+            // 既占位置又让人误以为漏了什么（用户反馈的第 3 点）。
+            if !plan.collapsed.isEmpty {
+                moreMenu(store: store, snapshot: snapshot, plan: plan)
+            }
         }
         .font(typography.playerFont(scaledFromBase: 17))
     }
+
+    /// 右侧图标的统一间距；与统一按钮尺寸一起保证「大小相等、间隔相等」。
+    static let actionSpacing: CGFloat = 14
+    /// 右侧图标按钮的统一触达尺寸。所有图标都被撑到这个正方形里居中，
+    /// 因此按钮大小一致、图标也各自在自己的交互区域正中央（用户反馈的第 4 点）。
+    static let actionButtonSize: CGFloat = 26
 
     /// 把「收藏 / 加入歌单」的渲染交给持有 @ObservedObject LibraryViewModel 的子视图。
     ///
@@ -322,7 +338,10 @@ struct FloatingPlayerBar: View {
         } label: {
             Image(systemName: enabled ? "pause.circle.fill" : "pause.circle")
                 .foregroundStyle(enabled ? Color.accentColor : Color.primary)
+                .frame(width: Self.actionButtonSize, height: Self.actionButtonSize)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
         .disabled(snapshot?.currentTrack == nil)
         .help(enabled ? "已开启：播完当前曲暂停（点击取消）" : "播完当前曲后暂停")
         .accessibilityLabel("播完当前曲暂停")
@@ -338,7 +357,10 @@ struct FloatingPlayerBar: View {
             store?.setMode(nextMode(after: mode))
         } label: {
             Image(systemName: Self.modeSymbol(mode))
+                .frame(width: Self.actionButtonSize, height: Self.actionButtonSize)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
         .help("\(Self.modeTitle(mode))（点击切换播放模式）")
         .accessibilityLabel("播放模式")
         .accessibilityValue(Self.modeTitle(mode))
@@ -376,7 +398,10 @@ struct FloatingPlayerBar: View {
     private var floatingLyricsButton: some View {
         Button { appState.toggleFloatingLyrics() } label: {
             Image(systemName: "text.bubble")
+                .frame(width: Self.actionButtonSize, height: Self.actionButtonSize)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
         .disabled(appState.lyricsViewModel == nil)
         .help("桌面悬浮歌词")
         .accessibilityLabel("桌面悬浮歌词")
@@ -388,7 +413,10 @@ struct FloatingPlayerBar: View {
     private var queueButton: some View {
         Button { isQueuePresented.toggle() } label: {
             Image(systemName: "music.note.list")
+                .frame(width: Self.actionButtonSize, height: Self.actionButtonSize)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
         .help("播放队列")
         .accessibilityLabel("播放队列")
         .popover(isPresented: $isQueuePresented, arrowEdge: .bottom) {
@@ -415,15 +443,15 @@ struct FloatingPlayerBar: View {
         return "speaker.wave.2"
     }
 
-    // MARK: - 更多菜单（收起的控件）
+    // MARK: - 更多菜单（仅承载被收起的控件）
 
+    /// 「更多」是**溢出容器**：只有 `plan.collapsed` 非空时才会被渲染（见 actionsRegion）。
+    ///
+    /// 这里刻意不再放音频信息 —— 音频规格已经并进主行的歌曲数据行，
+    /// 让这个按钮只表示「还有控件被收起了」，点开看到的就是那些控件（用户反馈的第 3 点）。
     private func moreMenu(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
                           plan: PlayerBarLayoutPlan) -> some View {
         Menu {
-            // 音频信息恒在：窄窗把规格从主行收起后，这里仍能读到真实编码/比特率等；
-            // 无数据时不编造，显示「音频信息不可用」。
-            audioInfoSection(snapshot: snapshot)
-            Divider()
             if plan.collapsed.contains(.mode) {
                 Menu("播放模式") {
                     // PlaybackMode 只声明了 Equatable（raw string 枚举不会自动获得 Hashable），
@@ -463,24 +491,18 @@ struct FloatingPlayerBar: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
+                .frame(width: Self.actionButtonSize, height: Self.actionButtonSize)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
-        .help("更多")
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("更多：显示放不下的控件")
         .accessibilityLabel("更多")
         .popover(isPresented: $isMenuVolumePresented, arrowEdge: .bottom) {
             VolumeSliderPopover(value: snapshot?.volume ?? 0) { committed in
                 store?.setVolume(committed)
             }
-        }
-    }
-
-    /// 「更多」菜单顶部的音频信息：只列内核报告过的字段。
-    @ViewBuilder
-    private func audioInfoSection(snapshot: PlaybackSnapshot?) -> some View {
-        if let summary = AudioInfoText.summary(snapshot?.audioTrackInfo) {
-            Text("音频：\(summary)")
-        } else {
-            Text("音频信息不可用")
         }
     }
 
@@ -582,17 +604,29 @@ private struct PlayerBarLibraryActions: View {
         Button(action: onToggleFavorite) {
             Image(systemName: isFavorited ? "star.fill" : "star")
                 .foregroundStyle(isFavorited ? Color.yellow : Color.primary)
+                .frame(width: FloatingPlayerBar.actionButtonSize, height: FloatingPlayerBar.actionButtonSize)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
         .disabled(!isActionable)
         .help(isFavorited ? "取消收藏" : "添加到收藏")
         .accessibilityLabel(isFavorited ? "取消收藏" : "添加到收藏")
     }
 
+    /// 「加入歌单」：用 `.menuIndicator(.hidden)` 去掉下拉箭头。
+    ///
+    /// 箭头会让 Menu 比普通按钮宽出一截（用户反馈的第 2 点「按钮太长」），
+    /// 图标也会因为箭头占位而偏左、不在交互区中央（第 4 点）。
+    /// 隐藏箭头后它与其余图标按钮同宽同高，点击仍照常弹菜单。
     private var playlistMenu: some View {
         Menu { playlistItems } label: {
             Image(systemName: "text.badge.plus")
+                .frame(width: FloatingPlayerBar.actionButtonSize, height: FloatingPlayerBar.actionButtonSize)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .disabled(!isActionable)
         .help("加入歌单")
         .accessibilityLabel("加入歌单")

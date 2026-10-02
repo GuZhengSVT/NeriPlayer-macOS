@@ -30,7 +30,10 @@ struct HomeView: View {
                 libraryOverview
             }
             .padding(24)
-            .frame(maxWidth: 1180, alignment: .leading)
+            // 不再把内容钳在 1180pt：窗口变宽时内容区必须真的变宽，
+            // 否则自适应网格拿不到更多可用宽度，列数永远不变（用户反馈的第 1 点）。
+            // 只保留一个宽松上限，避免超宽屏上单行卡片被拉得过长。
+            .frame(maxWidth: 2000, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .navigationTitle("首页")
@@ -212,13 +215,18 @@ private struct HomeSongSectionView: View {
     let onPlay: (SongData) -> Void
 
     /// 当前悬停的卡片 id。只用于加深底色，不参与任何尺寸计算 —— 需求 7 明确
-    /// 「悬停反馈不得改变卡片尺寸」，否则横向列表会随鼠标轻微抖动。
+    /// 「悬停反馈不得改变卡片尺寸」，否则网格会随鼠标轻微抖动。
     @State private var hoveredSongID: String?
 
-    /// 行高：52pt 封面 + 卡片上下各 6pt 内边距 = 64pt。固定高度是需求 7「悬停不得改变
-    /// 卡片尺寸」的前提 —— 高度由 GridItem 给定，卡片只填满它，鼠标掠过不会撑高任何一行。
-    private static let rowHeight: CGFloat = 64
+    /// 卡片上下内边距。高度不再由固定行高给定：改为网格按内容自然排布，
+    /// 卡片只填满自己的列宽，鼠标掠过不会撑高任何一行。
     private static let cardVerticalPadding: CGFloat = 6
+
+    /// 列数随窗口宽度自动变化：`.adaptive` 由 SwiftUI 按可用宽度算能放几列，
+    /// 因此放大/缩小窗口时卡片列数跟着变，而不是固定几列靠横向滚动看剩下的
+    /// （用户反馈的第 1 点）。上下限保证单列不会窄到挤掉标题、也不会宽到只剩两列。
+    private static let cardMinWidth: CGFloat = 260
+    private static let cardMaxWidth: CGFloat = 420
 
     var body: some View {
         HomeSection(title: source, systemImage: "music.note") {
@@ -230,13 +238,14 @@ private struct HomeSongSectionView: View {
                 Text("暂无内容。").font(.caption).foregroundStyle(.secondary)
             } else {
                 if let error = section.error { HomeInlineWarning(text: error) }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHGrid(rows: Array(repeating: GridItem(.fixed(Self.rowHeight), spacing: 8), count: 3), spacing: 14) {
-                        ForEach(section.items) { song in
-                            songCard(song)
-                        }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: Self.cardMinWidth, maximum: Self.cardMaxWidth), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    ForEach(section.items) { song in
+                        songCard(song)
                     }
-                    .padding(.vertical, 2)
                 }
             }
         }
@@ -263,8 +272,9 @@ private struct HomeSongSectionView: View {
                 Spacer(minLength: 0)
                 Image(systemName: "play.fill").font(.caption).foregroundStyle(.secondary)
             }
-            // 宽度固定为 300：卡片内边距不能靠挤压内容来换取，否则标题的可见字数会随悬停变化。
-            .frame(width: Self.cardWidth, alignment: .leading)
+            // 卡片填满网格给它的列宽（不再写死 300）：列数由上面的 adaptive 决定，
+            // 卡片宽度跟着列宽走，窗口变宽时每张卡片更舒展而不是留一片空白。
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, Self.cardVerticalPadding)
             .background(cardBackground(isHovered: isHovered), in: RoundedRectangle(cornerRadius: 10))
@@ -276,10 +286,6 @@ private struct HomeSongSectionView: View {
             if inside { hoveredSongID = song.id } else if hoveredSongID == song.id { hoveredSongID = nil }
         }
     }
-
-    /// 卡片内容宽度。300 是旧版卡片的外框宽度，本轮把「内边距」加在外框之外，
-    /// 因此卡片内部可见内容的宽度与位置一字未变，只是外面多了一圈底色与留白。
-    private static let cardWidth: CGFloat = 300
 
     /// 卡片底色：悬停时在同一色相上加深。两档都保持在低透明度，浅色与深色外观下都能看出
     /// 边界；与同一分区的 loading/error 占位（同样是「系统语义色 + 低透明度圆角块」）风格一致，

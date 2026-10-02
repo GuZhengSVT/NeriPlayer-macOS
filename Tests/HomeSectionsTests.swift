@@ -131,6 +131,44 @@ final class HomeSectionsTests: XCTestCase {
         model.stop()
     }
 
+    /// 用户反馈第 6 点：内容有缓存时再次进入首页不该闪加载图标。
+    ///
+    /// 判据是 isRefreshing —— 顶部那个 ProgressView 只由它驱动。
+    /// 第一次进入（无内容）应为 true；第二次进入（缓存已在，内容立刻可见）应为 false。
+    func testSecondLoadWithCachedContentDoesNotShowSpinner() async throws {
+        let client = HomeFixtureClient(), sessions = sessions()
+        let model = HomeViewModel(content: repository(client, sessions), sessions: sessions)
+        model.loadsYouTubeMusic = false
+
+        model.load()
+        XCTAssertTrue(model.isRefreshing, "首次进入没有任何内容，应显示加载指示")
+        await waitUntil { !model.isNeteaseLoading }
+        XCTAssertFalse(model.isRefreshing, "加载结算后指示应消失")
+
+        // 第二次进入：所有分区内容都还在（缓存命中），立刻可见 —— 不该再闪图标。
+        model.load()
+        XCTAssertFalse(model.isRefreshing, "已有缓存内容时再次进入首页不应显示加载指示")
+        await waitUntil { !model.isNeteaseLoading }
+        model.stop()
+    }
+
+    /// 缓存命中时不该重复打网络：第二次 load 的请求数不应增加。
+    func testSecondLoadServedFromCacheDoesNotRefetch() async throws {
+        let client = HomeFixtureClient(), sessions = sessions()
+        let model = HomeViewModel(content: repository(client, sessions), sessions: sessions)
+        model.loadsYouTubeMusic = false
+        model.load()
+        await waitUntil { !model.isNeteaseLoading }
+        let firstPlaylistCalls = await client.count("playlist:personalized")
+        XCTAssertGreaterThan(firstPlaylistCalls, 0, "首次应真的请求过")
+
+        model.load()
+        await waitUntil { !model.isNeteaseLoading }
+        let secondPlaylistCalls = await client.count("playlist:personalized")
+        XCTAssertEqual(secondPlaylistCalls, firstPlaylistCalls, "缓存仍新鲜时第二次进入不应再次请求")
+        model.stop()
+    }
+
     func testLateResultsFromPreviousAccountAreDiscarded() async throws {
         let client = HomeFixtureClient(), sessions = sessions()
         await client.configure(delay: 120_000_000)

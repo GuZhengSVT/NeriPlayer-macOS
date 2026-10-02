@@ -184,3 +184,82 @@ public struct AppTypographyModifier: ViewModifier { public init(model: SettingsV
 
 子智能体 A 曾按上一轮记忆把「去掉码率」一并带入；主智能体核对需求文档后确认本轮无此要求，
 已更正并同步 `PlayerBarLayoutTests` 断言为保留码率的 `MP3 · 128 kbps · 48 kHz · 2ch`。
+
+## 用户复核后的六项修正（2026-10-03 第二轮）
+
+用户在真机复核后提出六个问题，逐条定位与修复如下。
+
+### 1. 首页缩放窗口不改变卡片列数
+
+**根因**：歌曲区用的是 `LazyHGrid` + `ScrollView(.horizontal)`，**固定 3 行、横向滚动** ——
+列数由「内容有多少」决定，与窗口宽度无关，所以缩放窗口列数永远不变；
+外层还把整页内容钳在 `maxWidth: 1180`，窗口再宽也不会给网格更多可用宽度。
+
+**修复**：改为 `LazyVGrid` + `GridItem(.adaptive(minimum: 260, maximum: 420))`，列数由可用宽度算出；
+卡片从写死 300pt 改为 `maxWidth: .infinity` 填满自己的列；整页上限从 1180 放宽到 2000。
+
+### 2. 「加入歌单」与「更多」按钮太长
+
+**根因**：两者是 `Menu`，`.menuStyle(.borderlessButton)` 仍会为下拉箭头预留宽度，
+因此比普通图标按钮宽出一截（截图中明显偏长）。
+
+**修复**：加 `.menuIndicator(.hidden)` + `.fixedSize()`，宽度回到与其余图标一致。
+
+### 3. 「更多」按钮装的是歌曲信息
+
+**根因**：`moreMenu` 里恒有 `audioInfoSection`，且该菜单**无条件渲染** ——
+宽窗下所有控件都内联了，点开「更多」只看到音频信息。
+
+**修复**：① 删掉菜单里的音频信息（规格已在主行数据行显示）；
+② 「更多」改为**仅当 `plan.collapsed` 非空**时才渲染。它现在纯粹是溢出容器。
+
+### 4. 播放模式 / 播完暂停 / 收藏在各自交互区不居中
+
+**根因**：这几个按钮没有统一尺寸，`Menu` 还额外被箭头撑宽，
+图标因此落在各自点击区域的一侧而不是正中。
+
+**修复**：新增 `FloatingPlayerBar.actionButtonSize = 26`，
+所有右侧图标（模式、播完暂停、收藏、加入歌单、桌面歌词、队列、更多）的 label 统一
+`.frame(26×26)` + `.contentShape(Rectangle())`，并统一 `.buttonStyle(.borderless)`；
+间距统一为 `actionSpacing = 14`。
+
+### 5. 缩放窗口时播放器左右内容被遮挡
+
+**根因**：三区用**固定** `sideWidth = max(120, (width − 320 − 28) / 2)`。
+`max(120, …)` 这个下限在窗口窄于约 788pt 时会算出比可用空间更宽的两侧，
+三区总宽超过窗口宽度 → 左右被裁；同时宽档阈值 1120 偏低，
+右区 7 个按钮 + 音量实际需要约 416pt 而半区只有约 386pt，也会溢出。
+
+**修复**：左右区改为 `maxWidth: .infinity` 让 SwiftUI 分剩余空间（只会被压缩到 0，不会溢出），
+左区 `.leading`、右区 `.trailing`，中区保持固定 320 且 `.layoutPriority(1)` 优先不被压缩，
+两侧加 `.clipped()` 兜底；`wideThreshold` 1120 → 1200，使宽档真正装得下右区。
+
+实测（窄窗 780pt）：左区 14–230、中区 230–550（播放按钮中心 390 = 窗口正中）、右区 550–766，
+三者和恰为内容宽 752pt，无裁切。实测（宽窗 1440pt）：播放按钮中心 696+24 = 720 = 窗口正中；
+右侧图标均 26×26、间隔 14。
+
+### 6. 每次打开首页都出现加载图标
+
+**结论：首页内容**确实**有缓存**（内存 + 磁盘，网易云分区 30 分钟、雷达/YouTube 15 分钟，
+按会话上下文隔离），**但加载指示的判据写错了**。
+
+**根因**：`load()` 无条件 `isRefreshing = true`，而 `updateRefreshingFlag()` 又用
+`isNeteaseLoading`（**只要在请求就为真**，不管有没有内容可显示）。
+于是每次进入首页，即使缓存内容立刻渲染出来，标题旁仍会闪一个 `ProgressView`。
+
+**修复**：`updateRefreshingFlag()` 改为只在「有分区正在加载**且尚无可显示内容**」时为真
+（新增 `HomeSectionState.isLoadingAndEmpty`）。已有缓存内容时后台刷新静默进行。
+`isLoading` 本身保持原语义不变（刷新按钮禁用与测试同步都依赖它）。
+
+新增两个测试固化该行为：
+`testSecondLoadWithCachedContentDoesNotShowSpinner`（首次 true、再次 false）、
+`testSecondLoadServedFromCacheDoesNotRefetch`（缓存新鲜时不重复请求）。
+
+### 验证
+
+- `swift build` 通过；`swift test` 全量 **750 项 0 失败**（6 项按既有条件跳过）。
+- 打包 build 5；在真实运行的 app 中按上面各项实测（第 1、6 项另以单测固化）。
+- **限制**：computer-use 的原生 helper 在读取「首页」时会自身崩溃
+  （`observeSnapshot(app:limits:)` → SIGTRAP），与 app 无关（崩溃日志早于本轮改动即存在），
+  因此第 1 项列数变化与第 6 项图标的**肉眼复核**改用「单测 + 只读 AX 坐标」完成，
+  未取得首页的前后对比截图。

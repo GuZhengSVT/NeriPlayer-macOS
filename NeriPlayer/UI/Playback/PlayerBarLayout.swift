@@ -72,7 +72,12 @@ enum PlayerBarLayout {
 
     /// 宽度档位阈值（点）。主窗口最小宽度 720，常用 1024–1440。
     /// 阈值之间留出余量，避免在临界点来回抖动；档位抬高后不易触发，同时保留窄窗收起的兜底。
-    static let wideThreshold: CGFloat = 1120
+    ///
+    /// `wideThreshold` 为什么是 1200：宽档右侧要放下 7 个图标按钮 + 音量控件（≈416pt），
+    /// 而左右两区各只有「(窗口宽 − 中区 320 − 内边距 28) / 2」。要让右区真装得下，
+    /// 窗口至少需要 2×416 + 348 ≈ 1180；取 1200 留出余量。阈值偏低就会重演
+    /// 「右区内容超出自己的半区、被裁掉或压到中间」（用户反馈的第 5 点）。
+    static let wideThreshold: CGFloat = 1200
     static let regularThreshold: CGFloat = 980
     static let compactThreshold: CGFloat = 840
 

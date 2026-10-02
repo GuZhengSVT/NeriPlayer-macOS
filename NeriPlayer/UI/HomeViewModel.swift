@@ -18,6 +18,9 @@ struct HomeSectionState<Item: Equatable & Sendable>: Equatable, Sendable {
     var isEmpty: Bool { items.isEmpty }
     /// 已有内容时刷新失败，界面应保留内容并把错误降级为提示。
     var hasStaleContent: Bool { !items.isEmpty && error != nil }
+    /// 「正在加载且还没有任何内容可显示」——只有这种情况才需要加载指示；
+    /// 已有旧内容时的后台刷新应静默进行，否则每次进首页都会闪一下。
+    var isLoadingAndEmpty: Bool { isLoading && items.isEmpty }
 }
 
 struct HomeNeteaseSongSection: Identifiable, Equatable, Sendable {
@@ -109,9 +112,11 @@ final class HomeViewModel: ObservableObject {
         snapshot.hasLogin = loggedIn
         activeContext = context
         // 分区请求会被仓库的新鲜缓存吸收：同一上下文内重复进入首页不会重复打网络。
-        isRefreshing = true
+        // 这里不再无条件置 isRefreshing —— 有缓存内容时不该闪加载图标（用户反馈的第 6 点），
+        // 由各分区按「有没有内容可显示」自行决定，最后统一结算。
         loadNeteaseSections(context: context, force: force, hasLogin: loggedIn)
         if loadsYouTubeMusic { loadYouTubeMusic(force: force) }
+        updateRefreshingFlag()
     }
 
     /// 手动刷新：重取当前登录态下的全部网易云分区，保留已有内容直到新结果返回。
@@ -199,6 +204,9 @@ final class HomeViewModel: ObservableObject {
                                        resource: OnlineContentRepository.homePlaylistResource(source)) {
             updatePlaylistSection(source) { $0 = HomeSectionState(items: cached.value) }
         }
+        // 已有内容（来自内存/磁盘缓存或上次结果）时也照常标记 isLoading —— 它是「分区正在请求」
+        // 的真实状态，测试与刷新按钮的禁用都依赖它。界面要不要因此显示加载图标由
+        // updateRefreshingFlag() 决定：只有「还没有内容可显示」的分区才该闪图标。
         updatePlaylistSection(source) { $0.isLoading = true; $0.error = nil }
         let content = self.content
         neteaseTasks["playlist:\(source.rawValue)"] = Task { [weak self] in
@@ -356,8 +364,22 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    /// 顶部「正在刷新」指示与刷新按钮的禁用状态。
+    ///
+    /// 只在**确实有分区还没有内容可显示**时为真：首页内容本身有缓存（内存 + 磁盘，
+    /// 网易云分区 30 分钟、雷达/YouTube 15 分钟），再次进入首页时旧内容会立刻渲染，
+    /// 此时后台刷新不该在标题旁闪一个加载图标（用户反馈的第 6 点）。
+    /// 仍为空的分区由各分区自己的 HomeLoadingRow 占位，不依赖这个标志。
     private func updateRefreshingFlag() {
-        isRefreshing = isNeteaseLoading || snapshot.youtubeShelves.isLoading
+        isRefreshing = isNeteaseLoadingAndEmpty || snapshot.youtubeShelves.isLoadingAndEmpty
+    }
+
+    /// 网易云是否有「正在加载且尚无内容」的分区。
+    private var isNeteaseLoadingAndEmpty: Bool {
+        snapshot.playlistSections.contains { $0.section.isLoading && $0.section.items.isEmpty }
+            || snapshot.trendingSongSections.contains { $0.section.isLoading && $0.section.items.isEmpty }
+            || snapshot.radarSongSections.contains { $0.section.isLoading && $0.section.items.isEmpty }
+            || (snapshot.radarPlaylists.isLoading && snapshot.radarPlaylists.items.isEmpty)
     }
 
     private static func hasLogin(sessions: OnlineSessionStore) -> Bool {
