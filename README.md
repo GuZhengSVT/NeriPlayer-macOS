@@ -2,7 +2,9 @@
 
 参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前版本 **0.1.0**，与 Android 版版本号独立。
 
-0.1.0 是首个正式 Release 编译版本：推 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`，在 macOS runner 上打包并把 DMG 附到 GitHub Release。产物为 unsigned/ad-hoc 包（未配置签名密钥时），首次打开需在「系统设置 → 隐私与安全性」放行，或执行 `xattr -dr com.apple.quarantine /Applications/NeriPlayer.app`。
+**下载**：[NeriPlayer 0.1.0](https://github.com/GuZhengSVT/NeriPlayer-macOS/releases/latest)（`NeriPlayer-0.1.0.dmg`，要求 macOS 13+ / Apple Silicon）。
+
+首个正式 Release 编译版本。推 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`，在 macOS runner 上打包并把 DMG 附到 GitHub Release。产物为 ad-hoc 签名、未经公证（未配置签名密钥时），首次打开会被 Gatekeeper 拦截，需在「系统设置 → 隐私与安全性」放行，或执行 `xattr -dr com.apple.quarantine /Applications/NeriPlayer.app`。
 
 M9 已提供可分发的 `.app/.dmg` 打包路径：默认输出 unsigned/ad-hoc 包；配置 Developer ID 和 notarytool profile 后由同一脚本完成签名与公证。它仍不是 Android 版的完整替代，平台差异见下文。
 
