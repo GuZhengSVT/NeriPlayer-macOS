@@ -9,7 +9,11 @@ struct DownloadFinalizer: Sendable {
 
     static func verify(_ file: URL, expectedDuration: Double?) async throws {
         guard try DownloadStorage.size(file) > 0 else { throw DownloadFailure.integrity }
-        let engine = try MPVController(clientName: "NeriPlayer.DownloadProbe", options: MPVLaunchOption.silentAudio)
+        // 用 silentAudioOnly 而不是 silentAudio：下载校验会在后台对刚下好的文件起一个 mpv，
+        // 而被下载的文件通常带封面（enrich 的封面就是这一步之前写进去的）。只静音不关封面显示的话，
+        // mpv 会把封面当视频轨另开一个窗口弹到用户面前 —— 下载一首歌就闪一个窗口。
+        let options = MPVLaunchOption.silentAudioOnly
+        let engine = try MPVController(clientName: "NeriPlayer.DownloadProbe", options: options)
         try engine.setFlag("pause", true)
         try engine.loadFile(file.path)
         defer { try? engine.stop() }

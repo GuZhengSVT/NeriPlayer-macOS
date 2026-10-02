@@ -101,6 +101,42 @@ internal enum BilibiliParsing {
         return urls.compactMap { httpURL($0) }.first
     }
 
+    /// 用冻结的选轨规则（`BilibiliAudioSelection`）在 playurl 的 `data` 里按用户偏好挑一条音轨。
+    ///
+    /// 为什么放在 BilibiliParsing 而不是 client 里：client 是 actor，选轨是纯逻辑，
+    /// 放这里可以脱离网络直接单测；client 只负责「取数据 + 用这里挑出来的 URL 组装 ResolvedAudio」。
+    /// `audioURL` 保持原样不动 —— 收藏夹等旧路径与既有测试仍依赖它。
+    static func audioStream(in data: [String: Any], preferred: BilibiliQuality) -> BilibiliAudioStream? {
+        BilibiliAudioSelection.select(from: candidateStreams(in: data), preferred: preferred)
+    }
+
+    /// 归一化后的候选音轨。空数组即「这条响应里没有任何可播音轨」。
+    static func candidateStreams(in data: [String: Any]) -> [BilibiliAudioStream] {
+        BilibiliAudioSelection.streams(in: selectableData(data))
+    }
+
+    /// 把 playurl 的 `data` 归一化成冻结选轨逻辑能直接吃的形态。
+    ///
+    /// 为什么需要：真实 `durl` 分片的地址键是 `url` / `backup_url`，而 dash 音轨用的是
+    /// `baseUrl` / `base_url`。`BilibiliAudioSelection.streams(in:)` 统一按 `baseUrl` / `backupUrl`
+    /// 读取（它是面向 dash 写的）。这里只在缺失时补上别名，不覆盖平台原始字段 ——
+    /// 渐进式回退这一条路径必须能真的拿到 URL，否则「空音轨 → html5 回退」仍然会报没有音源。
+    static func selectableData(_ data: [String: Any]) -> [String: Any] {
+        guard let progressive = data["durl"] as? [[String: Any]], !progressive.isEmpty else { return data }
+        var result = data
+        result["durl"] = progressive.map { item -> [String: Any] in
+            var item = item
+            if item["baseUrl"] == nil, item["base_url"] == nil, let url = item["url"] as? String {
+                item["baseUrl"] = url
+            }
+            if item["backupUrl"] == nil, let backups = item["backup_url"] as? [String] {
+                item["backupUrl"] = backups
+            }
+            return item
+        }
+        return result
+    }
+
     static func expiry(_ url: URL) -> Date? {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         for name in ["deadline", "expires", "expire"] {

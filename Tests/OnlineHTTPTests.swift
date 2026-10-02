@@ -35,6 +35,20 @@ private struct FixtureNeteaseDeviceProvider: NeteaseDeviceContextProviding {
     }
 }
 
+/// 线程安全的回调收集器：URLProtocol 的 handler 在别的线程跑，测试断言在测试线程读。
+private final class LockedValues<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Value] = []
+    func append(_ value: Value) { lock.lock(); defer { lock.unlock() }; storage.append(value) }
+    var values: [Value] { lock.lock(); defer { lock.unlock() }; return storage }
+}
+
+private func neteaseAudioFixture(id: Int, url: String?, trial: Bool = false) -> String {
+    let trialField = trial ? #","freeTrialInfo":{"start":0,"end":30}"# : ""
+    let urlField = url.map { #""url":"\#($0)""# } ?? #""url":null"#
+    return #"{"code":200,"data":[{"id":\#(id),"code":200,\#(urlField),"expi":1800\#(trialField)}]}"#
+}
+
 final class OnlineHTTPTests: XCTestCase {
     private func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -240,5 +254,181 @@ final class OnlineHTTPTests: XCTestCase {
         XCTAssertEqual(try store.read(account: "test"), Data("test-cookie".utf8))
         try store.remove(account: "test")
         XCTAssertNil(try store.read(account: "test"))
+    }
+
+    // MARK: 音质偏好（需求 3）
+
+    /// eAPI 请求体是加密的，URLProtocol 层读不到 `level`。这里直接验证被抽出的纯决策函数：
+    /// 无损及以上必须走 flac 容器，否则用户选了无损也只会拿到 AAC。
+    func testNeteaseAudioRequestPlanMapsLevelAndContainer() {
+        let lossless = NeteaseClient.audioRequestPlan(for: .lossless)
+        XCTAssertEqual(lossless.level, "lossless")
+        XCTAssertEqual(lossless.encodeType, "flac")
+        XCTAssertEqual(NeteaseClient.audioRequestPlan(for: .hires).encodeType, "flac")
+        XCTAssertEqual(NeteaseClient.audioRequestPlan(for: .jyeffect).encodeType, "flac")
+        XCTAssertEqual(NeteaseClient.audioRequestPlan(for: .sky).encodeType, "flac")
+        XCTAssertEqual(NeteaseClient.audioRequestPlan(for: .jymaster).encodeType, "flac")
+        for lower in [NeteaseQuality.standard, .higher, .exhigh] {
+            let plan = NeteaseClient.audioRequestPlan(for: lower)
+            XCTAssertEqual(plan.level, lower.rawValue)
+            XCTAssertEqual(plan.encodeType, "aac")
+        }
+    }
+
+    /// 偏好 lossless 时第一次请求就是 lossless/flac（决策回调解密了加密体里的参数）。
+    func testNeteaseResolveHonoursPreferredLossless() async throws {
+        let host = UUID().uuidString.lowercased() + ".invalid"
+        defer { OnlineMockRouter.remove(host) }
+        let plans = LockedValues<NeteaseClient.NeteaseAudioRequestPlan>()
+        OnlineMockRouter.set(host) { _ in .init(json: neteaseAudioFixture(id: 123, url: "https://cdn.example/lossless.flac")) }
+        let client = NeteaseClient(session: session(), sessions: OnlineSessionStore(credentials: OnlineMemoryCredentials()),
+                                   baseURL: try XCTUnwrap(URL(string: "https://" + host)),
+                                   deviceProvider: FixtureNeteaseDeviceProvider(),
+                                   quality: .fixed(AudioQualityPreferences(netease: .lossless)),
+                                   requestObserver: { plans.append($0) })
+        let audio = try await client.resolve(song: SongData(source: .netease, sourceID: "123", title: "Test"))
+        XCTAssertEqual(audio.url.absoluteString, "https://cdn.example/lossless.flac")
+        XCTAssertEqual(audio.headers["Referer"], "https://music.163.com/")
+        XCTAssertEqual(plans.values.count, 1)
+        XCTAssertEqual(plans.values.first, NeteaseClient.NeteaseAudioRequestPlan(level: "lossless", encodeType: "flac"))
+    }
+
+    /// 首选档位没有 url 时必须顺着 degradeChain 往下退，而不是直接报「没有音源」。
+    func testNeteaseResolveDegradesThroughQualityChain() async throws {
+        let host = UUID().uuidString.lowercased() + ".invalid"
+        defer { OnlineMockRouter.remove(host) }
+        let plans = LockedValues<NeteaseClient.NeteaseAudioRequestPlan>()
+        let requests = LockedValues<Int>()
+        OnlineMockRouter.set(host) { _ in
+            requests.append(1)
+            // 前两次（lossless / exhigh）不给 url，第三档（higher）才给。
+            let call = requests.values.count
+            return .init(json: neteaseAudioFixture(id: 123, url: call >= 3 ? "https://cdn.example/higher.mp3" : nil))
+        }
+        let client = NeteaseClient(session: session(), sessions: OnlineSessionStore(credentials: OnlineMemoryCredentials()),
+                                   baseURL: try XCTUnwrap(URL(string: "https://" + host)),
+                                   deviceProvider: FixtureNeteaseDeviceProvider(),
+                                   quality: .fixed(AudioQualityPreferences(netease: .lossless)),
+                                   requestObserver: { plans.append($0) })
+        let audio = try await client.resolve(song: SongData(source: .netease, sourceID: "123", title: "Test"))
+        XCTAssertEqual(audio.url.absoluteString, "https://cdn.example/higher.mp3")
+        // lossless 的降级链是 lossless → exhigh → higher → standard，前两次拿不到就继续往下。
+        XCTAssertEqual(plans.values.map(\.level), ["lossless", "exhigh", "higher"])
+        XCTAssertEqual(plans.values.map(\.encodeType), ["flac", "aac", "aac"])
+    }
+
+    /// 只有试听片段时仍然拒绝播放（不能悄悄播 30 秒），但错误信息要说明原因。
+    func testNeteaseResolveRejectsPreviewOnlyAfterExhaustingChain() async throws {
+        let host = UUID().uuidString.lowercased() + ".invalid"
+        defer { OnlineMockRouter.remove(host) }
+        let plans = LockedValues<NeteaseClient.NeteaseAudioRequestPlan>()
+        OnlineMockRouter.set(host) { _ in .init(json: neteaseAudioFixture(id: 123, url: "https://cdn.example/trial", trial: true)) }
+        let client = NeteaseClient(session: session(), sessions: OnlineSessionStore(credentials: OnlineMemoryCredentials()),
+                                   baseURL: try XCTUnwrap(URL(string: "https://" + host)),
+                                   deviceProvider: FixtureNeteaseDeviceProvider(),
+                                   quality: .fixed(AudioQualityPreferences(netease: .exhigh)),
+                                   requestObserver: { plans.append($0) })
+        do {
+            _ = try await client.resolve(song: SongData(source: .netease, sourceID: "123", title: "Test"))
+            XCTFail("预览片段不应作为完整音源返回")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("试听"))
+        }
+        // exhigh 的链是 exhigh → higher → standard：试听也要把更低的档位试完。
+        XCTAssertEqual(plans.values.map(\.level), ["exhigh", "higher", "standard"])
+    }
+
+    /// 未配置任何偏好时读取到的必须是冻结默认值 exhigh。
+    ///
+    /// 用隔离的 UserDefaults 而不是 `.shared`：真实机器上可能已经被设置页写过别的档位，
+    /// 断言「未配置」必须建立在一个确实没有该键的存储上。
+    func testNeteaseDefaultPreferenceIsExhigh() throws {
+        let name = "moe.ouom.NeriPlayer.tests." + UUID().uuidString
+        let suite = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { suite.removePersistentDomain(forName: name) }
+        XCTAssertNil(suite.object(forKey: SettingsKeys.neteaseAudioQuality.name))
+        let preferences = AudioQualityPreferences(settings: SettingsStore(userDefaults: suite))
+        XCTAssertEqual(NeteaseQuality.default, .exhigh)
+        XCTAssertEqual(NeteaseQuality.default.rawValue, "exhigh")
+        XCTAssertEqual(SettingsKeys.neteaseAudioQuality.defaultValue, "exhigh")
+        XCTAssertEqual(preferences.netease, .exhigh)
+    }
+
+    // MARK: YouTube Music 选流
+
+    private func adaptiveFormat(bitrate: Int, mime: String = "audio/webm; codecs=\"opus\"") -> [String: Any] {
+        ["bitrate": bitrate, "mimeType": mime, "url": "https://googlevideo.com/x"]
+    }
+
+    /// 单条格式的码率（bit/s）。用可选读取而不是强制解包，便于 XCTUnwrap 给出清晰的失败信息。
+    private func bitrate(_ format: [String: Any]) -> Int? { format["bitrate"] as? Int }
+
+    func testYouTubeSelectsHighestWithinPreference() throws {
+        let formats = [adaptiveFormat(bitrate: 64_000), adaptiveFormat(bitrate: 128_000), adaptiveFormat(bitrate: 200_000)]
+        let ordered = YouTubeMusicClient.orderedFormats(formats, preferred: .high)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(bitrate(first), 128_000)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: first), .high)
+        // 200 kbps 属于 very_high（高于偏好），绝不能出现在候选里。
+        XCTAssertEqual(ordered.compactMap(bitrate), [128_000, 64_000])
+    }
+
+    func testYouTubeVeryHighPreferenceSelectsTopBitrate() throws {
+        let formats = [adaptiveFormat(bitrate: 64_000), adaptiveFormat(bitrate: 128_000), adaptiveFormat(bitrate: 200_000)]
+        let ordered = YouTubeMusicClient.orderedFormats(formats, preferred: .veryHigh)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(bitrate(first), 200_000)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: first), .veryHigh)
+        // very_high 的链条覆盖所有档位，同档内按码率降序。
+        XCTAssertEqual(ordered.compactMap(bitrate), [200_000, 128_000, 64_000])
+    }
+
+    func testYouTubeDegradesWhenPreferredTierMissing() throws {
+        // 只有 64 kbps（low）时，用户选 very_high 仍必须给出这条，而不是失败。
+        let ordered = YouTubeMusicClient.orderedFormats([adaptiveFormat(bitrate: 64_000)], preferred: .veryHigh)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(ordered.count, 1)
+        XCTAssertEqual(bitrate(first), 64_000)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: first), .low)
+    }
+
+    func testYouTubeSelectionNeverPicksAbovePreferenceWhenLowerExists() throws {
+        // 用户选 medium：128/200 kbps 都在偏好之上，medium 档里没有候选，只能降到 low（64 kbps）。
+        let formats = [adaptiveFormat(bitrate: 64_000), adaptiveFormat(bitrate: 128_000), adaptiveFormat(bitrate: 200_000)]
+        let ordered = YouTubeMusicClient.orderedFormats(formats, preferred: .medium)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(bitrate(first), 64_000)
+        let inferred = YouTubeMusicClient.inferredQuality(for: first)
+        XCTAssertEqual(inferred, .low)
+        XCTAssertLessThan(YouTubeQuality.ordered.firstIndex(of: inferred) ?? 0,
+                          YouTubeQuality.ordered.firstIndex(of: .medium) ?? 0)
+    }
+
+    /// 偏好高于所有候选（候选只有 low，偏好 very_high）时不能以「空链」收场：
+    /// 链上确实没有候选，但客户端必须仍然返回候选里的最高档，而不是抛错。
+    func testYouTubePreferenceAboveAllCandidatesStillReturnsCandidate() {
+        let ordered = YouTubeMusicClient.orderedFormats([adaptiveFormat(bitrate: 64_000), adaptiveFormat(bitrate: 70_000)],
+                                                        preferred: .veryHigh)
+        XCTAssertEqual(ordered.compactMap(bitrate), [70_000, 64_000])
+    }
+
+    /// 偏好低于所有候选（候选只有 200 kbps，偏好 low）时的兜底：返回超规格的那条而不是失败。
+    func testYouTubePreferenceBelowAllCandidatesFallsBackToHighest() throws {
+        let ordered = YouTubeMusicClient.orderedFormats([adaptiveFormat(bitrate: 200_000)], preferred: .low)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(ordered.count, 1)
+        XCTAssertEqual(bitrate(first), 200_000)
+    }
+
+    /// 非音频流必须被过滤掉，码率字段缺失时按 low 处理而不是崩掉。
+    func testYouTubeIgnoresNonAudioAndMissingBitrate() throws {
+        let ordered = YouTubeMusicClient.orderedFormats([
+            ["bitrate": 900_000, "mimeType": "video/mp4"],
+            ["mimeType": "audio/mp4"]
+        ], preferred: .high)
+        let first = try XCTUnwrap(ordered.first)
+        XCTAssertEqual(ordered.count, 1)
+        XCTAssertEqual(first["mimeType"] as? String, "audio/mp4")
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: first), .low)
     }
 }

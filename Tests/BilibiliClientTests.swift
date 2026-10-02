@@ -88,6 +88,109 @@ final class BilibiliClientTests: XCTestCase {
         XCTAssertEqual(resolved.expiresAt?.timeIntervalSince1970, 2_000_000_000)
     }
 
+    /// 问题 2 的关键：playurl 必须带 gaia_source=view-card 与 otype=json，否则 B 站风控只回 v_voucher。
+    func testResolveSendsGaiaSourceAndJsonTypeOnFirstPlayurlRequest() async throws {
+        let fixture = try BiliHTTPFixture()
+        try fixture.sessions.saveCookieHeader("SESSDATA=test", for: .bilibili)
+        let anonymousNav = nav
+        fixture.handler = { request in
+            switch request.url?.path {
+            case "/x/web-interface/nav": return .json(anonymousNav)
+            case "/x/web-interface/wbi/view": return .json(Self.video)
+            case "/x/player/wbi/playurl":
+                return .json(#"{"code":0,"data":{"dash":{"audio":[{"bandwidth":192000,"baseUrl":"https://cdn.example/high.m4a"}]}}}"#)
+            default: throw OnlineError.invalidResponse
+            }
+        }
+        _ = try await fixture.client().resolve(song: SongData(source: .bilibili, sourceID: bvid + ":2", title: "Second"))
+        let playurl = fixture.requests.filter { $0.url?.path == "/x/player/wbi/playurl" }
+        XCTAssertEqual(playurl.count, 1, "有音轨时不应重试")
+        let items = try Self.query(of: try XCTUnwrap(playurl.first))
+        XCTAssertEqual(items.first { $0.name == "gaia_source" }?.value, "view-card")
+        XCTAssertEqual(items.first { $0.name == "otype" }?.value, "json")
+        XCTAssertEqual(items.first { $0.name == "platform" }?.value, "pc")
+        XCTAssertEqual(items.first { $0.name == "fnval" }?.value, "272")
+        XCTAssertEqual(items.first { $0.name == "cid" }?.value, "222")
+    }
+
+    /// 只有 v_voucher 的风控响应：DASH 重试 3 次后必须再走 html5 渐进式回退拿到 durl。
+    func testRiskControlResponseRetriesThenFallsBackToHtml5Progressive() async throws {
+        let fixture = try BiliHTTPFixture()
+        try fixture.sessions.saveCookieHeader("SESSDATA=test", for: .bilibili)
+        let anonymousNav = nav
+        fixture.handler = { request in
+            switch request.url?.path {
+            case "/x/web-interface/nav": return .json(anonymousNav)
+            case "/x/web-interface/wbi/view": return .json(Self.video)
+            case "/x/player/wbi/playurl":
+                let items = try URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+                guard items.first { $0.name == "platform" }?.value == "html5" else {
+                    return .json(#"{"code":0,"message":"OK","data":{"v_voucher":"risk-control-ticket"}}"#)
+                }
+                return .json(#"{"code":0,"data":{"durl":[{"url":"https://cdn.example/progressive.mp4?deadline=2000000000"}]}}"#)
+            default: throw OnlineError.invalidResponse
+            }
+        }
+        let resolved = try await fixture.client().resolve(song: SongData(source: .bilibili, sourceID: bvid + ":2", title: "Second"))
+        XCTAssertEqual(resolved.url.lastPathComponent, "progressive.mp4")
+        XCTAssertNil(resolved.headers["Cookie"], "会话 Cookie 不能泄漏给 CDN")
+        XCTAssertEqual(resolved.expiresAt?.timeIntervalSince1970, 2_000_000_000)
+        let playurl = fixture.requests.filter { $0.url?.path == "/x/player/wbi/playurl" }
+        XCTAssertEqual(playurl.count, 4, "3 次 DASH 重试 + 1 次 html5 回退")
+        // 每一次都重新签名并带上 gaia_source；复用缓存的签名串会让重试失去意义。
+        for request in playurl {
+            let items = try Self.query(of: request)
+            XCTAssertEqual(items.first { $0.name == "gaia_source" }?.value, "view-card")
+            XCTAssertEqual(items.first { $0.name == "w_rid" }?.value?.count, 32)
+        }
+        let fallback = try Self.query(of: try XCTUnwrap(playurl.last))
+        XCTAssertEqual(fallback.first { $0.name == "fnval" }?.value, "0")
+        XCTAssertEqual(fallback.first { $0.name == "fnver" }?.value, "0")
+        XCTAssertEqual(fallback.first { $0.name == "platform" }?.value, "html5")
+        XCTAssertEqual(fallback.first { $0.name == "high_quality" }?.value, "1")
+    }
+
+    /// 问题 3：同一份 DASH 候选按用户偏好选轨，没有该档位时降级而不是报错。
+    func testSelectionHonorsPreferenceAcrossBitrates() async throws {
+        let fixture = try BiliHTTPFixture()
+        try fixture.sessions.saveCookieHeader("SESSDATA=test", for: .bilibili)
+        let anonymousNav = nav
+        fixture.handler = { request in
+            switch request.url?.path {
+            case "/x/web-interface/nav": return .json(anonymousNav)
+            case "/x/web-interface/wbi/view": return .json(Self.video)
+            case "/x/player/wbi/playurl": return .json(Self.bitrateTracks)
+            default: throw OnlineError.invalidResponse
+            }
+        }
+        let song = SongData(source: .bilibili, sourceID: bvid + ":2", title: "Second")
+        let low = try await fixture.client(bilibiliQuality: .low).resolve(song: song)
+        XCTAssertEqual(low.url.lastPathComponent, "low64.m4a")
+        let high = try await fixture.client(bilibiliQuality: .high).resolve(song: song)
+        XCTAssertEqual(high.url.lastPathComponent, "high192.m4a")
+        // 没有 flac 时 hires 退到最高可用，而不是失败。
+        let hires = try await fixture.client(bilibiliQuality: .hires).resolve(song: song)
+        XCTAssertEqual(hires.url.lastPathComponent, "high192.m4a")
+    }
+
+    /// 偏好 dolby 时命中带 dolby 标签的音轨，即使它旁边有码率更高的普通轨。
+    func testDolbyPreferenceSelectsDolbyTrack() async throws {
+        let fixture = try BiliHTTPFixture()
+        try fixture.sessions.saveCookieHeader("SESSDATA=test", for: .bilibili)
+        let anonymousNav = nav
+        fixture.handler = { request in
+            switch request.url?.path {
+            case "/x/web-interface/nav": return .json(anonymousNav)
+            case "/x/web-interface/wbi/view": return .json(Self.video)
+            case "/x/player/wbi/playurl": return .json(Self.dolbyTracks)
+            default: throw OnlineError.invalidResponse
+            }
+        }
+        let resolved = try await fixture.client(bilibiliQuality: .dolby)
+            .resolve(song: SongData(source: .bilibili, sourceID: bvid + ":2", title: "Second"))
+        XCTAssertEqual(resolved.url.lastPathComponent, "dolby.m4s")
+    }
+
     func testUnknownPageDoesNotFallBackToPageOne() async throws {
         let fixture = try BiliHTTPFixture()
         try fixture.sessions.saveCookieHeader("SESSDATA=test", for: .bilibili)
@@ -194,7 +297,17 @@ final class BilibiliClientTests: XCTestCase {
         XCTAssertEqual(BilibiliParsing.partMetadata("02. Song - Artist", fallbackArtist: "UP").artist, "Artist")
     }
 
+    /// 解析请求 URL 的查询项；断言风控参数是否真的发出去了。
+    /// 刻意做成 static：handler 是 @Sendable 闭包，实例方法会让闭包隐式捕获非 Sendable 的 XCTestCase。
+    private static func query(of request: URLRequest) throws -> [URLQueryItem] {
+        URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+    }
+
     private static let video = #"{"code":0,"data":{"aid":123,"bvid":"BV1xx411c7mD","title":"Video","owner":{"name":"UP"},"pages":[{"page":1,"cid":111,"part":"First","duration":20},{"page":2,"cid":222,"part":"Second","duration":42}]}}"#
+    /// 64/128/192 kbps 三条普通音轨，用于验证选轨偏好与降级。
+    private static let bitrateTracks = #"{"code":0,"data":{"dash":{"audio":[{"bandwidth":64000,"baseUrl":"https://cdn.example/low64.m4a"},{"bandwidth":128000,"baseUrl":"https://cdn.example/medium128.m4a"},{"bandwidth":192000,"baseUrl":"https://cdn.example/high192.m4a"}]}}}"#
+    /// 杜比轨旁边有一条码率更高的普通轨时，只有标签语义能把它挑出来。
+    private static let dolbyTracks = #"{"code":0,"data":{"dash":{"audio":[{"bandwidth":800000,"baseUrl":"https://cdn.example/normal.m4a"}],"dolby":{"audio":[{"bandwidth":448000,"baseUrl":"https://cdn.example/dolby.m4s"}]}}}}"#
 }
 
 private final class BiliMemoryCredentials: OnlineCredentialStore, @unchecked Sendable {
@@ -241,7 +354,12 @@ private final class BiliHTTPFixture: @unchecked Sendable {
     }
     deinit { session.invalidateAndCancel(); BiliMockProtocol.unregister(base.host ?? "") }
     func client() -> BilibiliClient {
+        client(bilibiliQuality: .high)
+    }
+    /// 注入固定音质偏好：测试不该读写真实 UserDefaults，也不该受开发者本机设置影响。
+    func client(bilibiliQuality: BilibiliQuality) -> BilibiliClient {
         BilibiliClient(session: session, sessions: sessions, apiBase: base, passportBase: base,
+                       quality: .fixed(AudioQualityPreferences(bilibili: bilibiliQuality)),
                        now: { Date(timeIntervalSince1970: 1_702_204_169) })
     }
     func handle(_ request: URLRequest) throws -> Response {

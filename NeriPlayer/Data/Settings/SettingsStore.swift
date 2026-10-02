@@ -158,6 +158,18 @@ public enum SettingsKeys {
     public static let lyricsFontFamily = SettingsKey<String>("lyricsFontFamily", default: TypographyFontFamily.systemID)
     /// 底部播放栏歌词行字号。
     public static let compactLyricsFontSize = SettingsKey<Double>("compactLyricsFontSize", default: 18)
+    // MARK: 各平台音质偏好（对齐 Android AutoSettingsSchema.audioQuality）
+    /// 网易云音质（`level` 参数值，例如 "exhigh" / "lossless" / "jymaster"）。
+    /// 默认 exhigh 与 Android 的 `defaultString = "exhigh"` 一致。
+    public static let neteaseAudioQuality = SettingsKey<String>("neteaseAudioQuality", default: NeteaseQuality.default.rawValue)
+    /// YouTube Music 音质（"low" / "medium" / "high" / "very_high"）。默认 high 对齐 Android。
+    public static let youtubeMusicAudioQuality = SettingsKey<String>(
+        "youtubeMusicAudioQuality", default: YouTubeQuality.default.rawValue
+    )
+    /// Bilibili 音质（"dolby" / "hires" / "lossless" / "high" / "medium" / "low"）。默认 high 对齐 Android。
+    public static let bilibiliAudioQuality = SettingsKey<String>(
+        "bilibiliAudioQuality", default: BilibiliQuality.default.rawValue
+    )
 }
 
 // MARK: - 变更事件

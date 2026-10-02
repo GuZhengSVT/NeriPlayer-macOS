@@ -48,6 +48,13 @@ public final class SettingsViewModel: ObservableObject {
     @Published public private(set) var compactLyricsFontSize: Double
     /// 本机可用字体家族（含「系统字体」以外的真实家族），仅在设置页出现时取一次。
     @Published public private(set) var availableFontFamilies: [String] = []
+    // MARK: 在线音质（需求 3，对齐 Android 设置 → 音质）
+    /// 网易云音质档位。
+    @Published public private(set) var neteaseQuality: NeteaseQuality
+    /// YouTube Music 音质档位。
+    @Published public private(set) var youtubeMusicQuality: YouTubeQuality
+    /// Bilibili 音质档位。
+    @Published public private(set) var bilibiliQuality: BilibiliQuality
 
     // MARK: 依赖
 
@@ -56,6 +63,8 @@ public final class SettingsViewModel: ObservableObject {
     /// 字体设置的变更订阅（需求 5）。歌词窗口也有一个字号滑杆，它直接写 SettingsStore、
     /// 不经过本对象；不订阅的话，外观页会一直显示打开设置页那一刻的旧值。
     private var fontObservation: Task<Void, Never>?
+    /// 在线音质三个键的变更订阅（需求 3）。理由同上：备份恢复 / 未来的其他入口可能绕过本对象写它们。
+    private var audioQualityObservation: Task<Void, Never>?
     /// 重新扫描一个目录的动作。由持有媒体库视图模型的调用方注入 ——
     /// 设置页不该自己去拿 LibraryViewModel，否则两者会互相引用。
     ///
@@ -92,12 +101,19 @@ public final class SettingsViewModel: ObservableObject {
         self.compactLyricsFontSize = AppTypographyDefaults.clamped(
             settings.value(for: SettingsKeys.compactLyricsFontSize),
             in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
+        // 在线音质：与读取侧同一套夹取（枚举的 init(stored:)），坏值不会让设置页打不开。
+        let qualities = AudioQualityPreferences(settings: settings)
+        self.neteaseQuality = qualities.netease
+        self.youtubeMusicQuality = qualities.youtubeMusic
+        self.bilibiliQuality = qualities.bilibili
         loadAvailableFonts()
         observeFontSettings()
+        observeAudioQualitySettings()
     }
 
     deinit {
         fontObservation?.cancel()
+        audioQualityObservation?.cancel()
     }
 
     /// 订阅字体相关的设置键，把「别处写入」的值同步到本地副本。
@@ -163,6 +179,10 @@ public final class SettingsViewModel: ObservableObject {
         compactLyricsFontSize = AppTypographyDefaults.clamped(
             settings.value(for: SettingsKeys.compactLyricsFontSize),
             in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
+        let qualities = AudioQualityPreferences(settings: settings)
+        neteaseQuality = qualities.netease
+        youtubeMusicQuality = qualities.youtubeMusic
+        bilibiliQuality = qualities.bilibili
         refreshDirectories()
     }
 
@@ -276,6 +296,63 @@ public final class SettingsViewModel: ObservableObject {
         guard clamped != defaultVolume else { return }
         defaultVolume = clamped
         settings.set(clamped, for: SettingsKeys.defaultVolume)
+    }
+
+    // MARK: 在线音质（需求 3）
+
+    /// 订阅三个音质键，把「别处写入」的值同步到本地副本。
+    ///
+    /// 为什么与字体订阅分开成一条：两者的处理逻辑不同（音质是枚举解析 + 夹取，字体是数值夹取 +
+    /// 家族校验），混在一个 switch 里会让两边都难读；订阅者各自独立，互不影响。
+    /// 只在值真的不同时写入属性，避免把「自己刚写出去的值」再回灌成一次多余的重绘。
+    private func observeAudioQualitySettings() {
+        let stream = settings.changes()
+        audioQualityObservation = Task { [weak self] in
+            for await change in stream {
+                guard !Task.isCancelled, let self else { return }
+                switch change.key {
+                case SettingsKeys.neteaseAudioQuality.name:
+                    let value = NeteaseQuality(stored: self.settings.value(for: SettingsKeys.neteaseAudioQuality))
+                    if value != self.neteaseQuality { self.neteaseQuality = value }
+                case SettingsKeys.youtubeMusicAudioQuality.name:
+                    let value = YouTubeQuality(stored: self.settings.value(for: SettingsKeys.youtubeMusicAudioQuality))
+                    if value != self.youtubeMusicQuality { self.youtubeMusicQuality = value }
+                case SettingsKeys.bilibiliAudioQuality.name:
+                    let value = BilibiliQuality(stored: self.settings.value(for: SettingsKeys.bilibiliAudioQuality))
+                    if value != self.bilibiliQuality { self.bilibiliQuality = value }
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// 设置网易云音质。与外观 / 强调色同构：先在写入侧夹取（枚举解析），再落盘 rawValue。
+    ///
+    /// 用 `init(stored:)` 而不是 `rawValue` 直接构造：这个 setter 的入参来自 Picker，
+    /// 但设置项也可能被备份导入之类的路径调用，统一走「无法识别就回落默认档」的规则，
+    /// 存进去的一定是合法档位，解析路径（NeteaseClient）就不必再防御一次。
+    public func setNeteaseQuality(_ quality: NeteaseQuality) {
+        let resolved = NeteaseQuality(stored: quality.rawValue)
+        guard resolved != neteaseQuality else { return }
+        neteaseQuality = resolved
+        settings.set(resolved.rawValue, for: SettingsKeys.neteaseAudioQuality)
+    }
+
+    /// 设置 YouTube Music 音质。
+    public func setYouTubeMusicQuality(_ quality: YouTubeQuality) {
+        let resolved = YouTubeQuality(stored: quality.rawValue)
+        guard resolved != youtubeMusicQuality else { return }
+        youtubeMusicQuality = resolved
+        settings.set(resolved.rawValue, for: SettingsKeys.youtubeMusicAudioQuality)
+    }
+
+    /// 设置 Bilibili 音质。
+    public func setBilibiliQuality(_ quality: BilibiliQuality) {
+        let resolved = BilibiliQuality(stored: quality.rawValue)
+        guard resolved != bilibiliQuality else { return }
+        bilibiliQuality = resolved
+        settings.set(resolved.rawValue, for: SettingsKeys.bilibiliAudioQuality)
     }
 
     // MARK: 媒体库目录

@@ -169,9 +169,15 @@ public enum MPVSeekMode: String, Sendable {
 }
 
 /// File lifecycle events retain libmpv's playlist entry identity across replacements.
+///
+/// `.quit` 与 `.ended` 刻意分开：`.ended(reachedEOF: false)` 表示「文件结束但不是自然播完」，
+/// 而 `.quit` 表示「mpv 自己终止了这个文件」（`MPV_END_FILE_REASON_QUIT`：quit 命令或播放器关闭）。
+/// 两者的状态收尾相同，但调用方需要能把它单独识别出来 —— 音频专用配置下本不该再出现这条事件，
+/// 一旦出现就说明 mpv 那边又有了 app 不知情的终止来源，必须留下可检索的日志。
 public enum MPVFileEvent: Sendable {
     case loaded(entryID: Int64)
     case ended(entryID: Int64, reachedEOF: Bool)
+    case quit(entryID: Int64)
     case failed(entryID: Int64, errorCode: Int32)
 }
 
@@ -258,19 +264,35 @@ final class MPVEventLoop: @unchecked Sendable {
         case MPV_EVENT_FILE_LOADED:
             broadcastFileEvent(.loaded(entryID: activeEntryID))
         case MPV_EVENT_END_FILE:
-            guard let raw = event.data else { return }
-            let end = raw.assumingMemoryBound(to: mpv_event_end_file.self).pointee
-            if end.reason == MPV_END_FILE_REASON_ERROR {
-                broadcastFileEvent(.failed(entryID: end.playlist_entry_id, errorCode: end.error))
-            } else {
-                broadcastFileEvent(.ended(entryID: end.playlist_entry_id, reachedEOF: end.reason == MPV_END_FILE_REASON_EOF))
-            }
+            dispatchEndFile(event)
         case MPV_EVENT_LOG_MESSAGE:
             log(event: event)
         default:
             // 其余事件（SEEK / PLAYBACK_RESTART / FILE_LOADED 等）M1-T2 不消费，
             // 需要时在 M1-T3 通过新增订阅接口暴露。
             break
+        }
+    }
+
+    /// 把 MPV_EVENT_END_FILE 的 reason 映射成 MPVFileEvent。
+    ///
+    /// 这段单独成一个方法而不是留在 dispatch 的 switch 里：dispatch 已经承载了事件类型分发，
+    /// 再内嵌一层 reason 分支会同时压垮两层的可读性（也会触发 cyclomatic_complexity）。
+    private func dispatchEndFile(_ event: mpv_event) {
+        guard let raw = event.data else { return }
+        let end = raw.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+        switch end.reason {
+        case MPV_END_FILE_REASON_ERROR:
+            broadcastFileEvent(.failed(entryID: end.playlist_entry_id, errorCode: end.error))
+        case MPV_END_FILE_REASON_QUIT:
+            // QUIT 是「mpv 自己终止」：quit 命令、或 mpv 自己创建的窗口被用户关闭。
+            // 单独成一类，不再混进 `.ended(reachedEOF: false)` —— 后者会被上层当成
+            // 「结束但不是自然 EOF」而静默丢弃，真出问题时无从查起。
+            broadcastFileEvent(.quit(entryID: end.playlist_entry_id))
+        default:
+            // 其余 reason（EOF / STOP / REDIRECT / 未来新增值）都按「被动结束」处理：
+            // 只有 reason == EOF 才算自然播完，队列才会自动推进。
+            broadcastFileEvent(.ended(entryID: end.playlist_entry_id, reachedEOF: end.reason == MPV_END_FILE_REASON_EOF))
         }
     }
 

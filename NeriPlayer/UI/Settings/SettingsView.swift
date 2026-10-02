@@ -187,6 +187,7 @@ struct SettingsView: View {
             if let audioEffectsViewModel { settingsGroup("音效与输出") { AudioEffectsSettingsView(model: audioEffectsViewModel) } } else {
                 settingsGroup("音效与输出") { Text("音效设置尚未就绪。").foregroundStyle(.secondary) }
             }
+            settingsGroup("在线音质") { audioQualityContent }
             settingsGroup("播放控制") {
                 Text("播放 / 暂停、上一首、下一首与进度在窗口底部的播放控制栏。")
                     .foregroundStyle(.secondary)
@@ -253,6 +254,45 @@ struct SettingsView: View {
     }
     private var appearanceBinding: Binding<AppearanceMode> { Binding(get: { viewModel.appearance }, set: viewModel.setAppearance) }
     private var accentBinding: Binding<AccentColorOption> { Binding(get: { viewModel.accent }, set: viewModel.setAccent) }
+    private var neteaseQualityBinding: Binding<NeteaseQuality> {
+        Binding(get: { viewModel.neteaseQuality }, set: viewModel.setNeteaseQuality)
+    }
+    private var youtubeMusicQualityBinding: Binding<YouTubeQuality> {
+        Binding(get: { viewModel.youtubeMusicQuality }, set: viewModel.setYouTubeMusicQuality)
+    }
+    private var bilibiliQualityBinding: Binding<BilibiliQuality> {
+        Binding(get: { viewModel.bilibiliQuality }, set: viewModel.setBilibiliQuality)
+    }
+
+    /// 「在线音质」分组：三个平台各一个下拉项。
+    ///
+    /// 为什么与「音效与输出」并列成独立分组：这一组是**在线解析**的偏好（决定请求哪一档、
+    /// 挑哪条音轨），而音效组是**本机输出**链路（均衡器、响度、独占）。两者互不影响，
+    /// 混在一组里会让「音质没生效」的排查方向变模糊。
+    /// 本组不依赖 audioEffectsViewModel，后者缺失时同样渲染。
+    private var audioQualityContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // 网易云用 menuTitle：无损及以上需要会员，下拉项里直接标出「（需会员）」。
+            Picker("网易云", selection: neteaseQualityBinding) {
+                ForEach(NeteaseQuality.allCases) { quality in
+                    Text(quality.menuTitle).tag(quality)
+                }
+            }
+            Picker("YouTube Music", selection: youtubeMusicQualityBinding) {
+                ForEach(YouTubeQuality.allCases) { quality in
+                    Text(quality.title).tag(quality)
+                }
+            }
+            Picker("Bilibili", selection: bilibiliQualityBinding) {
+                ForEach(BilibiliQuality.allCases) { quality in
+                    Text(quality.title).tag(quality)
+                }
+            }
+            Text("平台未提供所选档位时会自动降级到下一档，不会因此播不出来；"
+                 + "标有「需会员」的档位需要对应平台的会员权益。")
+                .font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
+        }
+    }
 
     private var libraryDirectoryContent: some View {
         VStack(alignment: .leading, spacing: 10) {

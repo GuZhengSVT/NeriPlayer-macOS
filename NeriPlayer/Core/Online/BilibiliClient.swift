@@ -12,20 +12,31 @@ public actor BilibiliClient: OnlineMusicClient {
     private let sessions: OnlineSessionStore
     private let apiBase: URL
     private let passportBase: URL
+    /// 音质偏好读取入口。刻意不在构造时读一次：actor 会长期存活，缓存偏好会让设置页的改动不生效。
+    private let qualityProvider: AudioQualityProvider
     private let now: @Sendable () -> Date
     private var cachedMixin: (key: String, date: Date)?
     private var anonymousCookies: [String: String] = [:]
     private var anonymousCookiesDate: Date?
     private var qrCookies: [String: [String: String]] = [:]
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    /// 空音轨重试次数，与 Android `BiliClient.EMPTY_AUDIO_RETRY_COUNT` 一致。
+    private static let emptyAudioRetryCount = 3
+    /// 空音轨重试的基础等待（纳秒），与 Android `EMPTY_AUDIO_RETRY_DELAY_MS = 250` 一致。
+    private static let emptyAudioRetryDelayNanoseconds: UInt64 = 250_000_000
+    /// 来源风控参数。Android 的 `PlayOptions.gaiaSource` 由 BiliPlaybackRepository 传 "view-card"。
+    private static let gaiaSource = "view-card"
 
+    /// `quality` 默认 `.settings`（生产读实时设置），测试可注入 `.fixed(...)` 得到确定结果。
     public init(session: URLSession = .shared, sessions: OnlineSessionStore = .shared,
                 apiBase: URL? = nil, passportBase: URL? = nil,
+                quality: AudioQualityProvider = .settings,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.session = session
         self.sessions = sessions
         self.apiBase = apiBase ?? BilibiliParsing.endpoint(host: "api.bilibili.com")
         self.passportBase = passportBase ?? BilibiliParsing.endpoint(host: "passport.bilibili.com")
+        self.qualityProvider = quality
         self.now = now
     }
 
@@ -98,17 +109,15 @@ public actor BilibiliClient: OnlineMusicClient {
             throw OnlineError.unavailable("指定的 Bilibili 分 P 已不存在")
         }
         let canonicalBV = data["bvid"] as? String ?? identity.bvid
-        let parameters = ["bvid": canonicalBV, "cid": cid, "fnval": "272", "fnver": "0", "fourk": "0", "platform": "pc"]
-        let playData = try await api("/x/player/wbi/playurl", parameters: parameters, signed: true)
-        var url = BilibiliParsing.audioURL(playData)
-        if url == nil {
-            // Android also falls back to html5 progressive media when DASH has no audio.
-            let fallback = try await api("/x/player/wbi/playurl", parameters: [
-                "bvid": canonicalBV, "cid": cid, "fnval": "0", "fnver": "0", "platform": "html5", "high_quality": "1"
-            ], signed: true)
-            url = BilibiliParsing.audioURL(fallback)
+        // gaia_source=view-card 是 B 站的风控来源校验：不带它时接口返回 code=0 但 data 里只有
+        // v_voucher，没有 dash 也没有 durl（实测 570 条视频 0 条有音轨，补上后 569 条可播）。
+        // 这与是否登录、是否大会员无关，Android 的 PlayOptions.gaiaSource 一直带着它。
+        // otype=json 同样对齐 Android 的 putCommonParams（固定下发 JSON 而不是 XML）。
+        let preferred = qualityProvider.preferences().bilibili
+        let playData = try await audioPlayData(bvid: canonicalBV, cid: cid)
+        guard let stream = BilibiliParsing.audioStream(in: playData, preferred: preferred) else {
+            throw OnlineError.unavailable("Bilibili 未返回可播放音轨（可能被平台风控拦截）")
         }
-        guard let url else { throw OnlineError.unavailable("Bilibili 未返回可播放音轨") }
         var resolvedSong = song
         resolvedSong.sourceID = identity.sourceID
         resolvedSong.sourceSubID = cid
@@ -118,7 +127,51 @@ public actor BilibiliClient: OnlineMusicClient {
         resolvedSong.duration = (page["duration"] as? NSNumber)?.doubleValue ?? song.duration
         let headers = ["User-Agent": Self.userAgent, "Referer": identity.pageURL?.absoluteString ?? "https://www.bilibili.com/"]
         // Session cookies stay on API requests, never leak to CDN audio URLs.
-        return ResolvedAudio(song: resolvedSong, url: url, headers: headers, expiresAt: BilibiliParsing.expiry(url))
+        // 渐进式回退（durl）的容器含视频轨，但播放侧以 vid=no / vo=null 启动 mpv（MPVLaunchOption.audioOnly），
+        // 只会解出音轨，因此这里直接返回它不会开窗，也不会把视频当音频播。
+        return ResolvedAudio(song: resolvedSong, url: stream.url, headers: headers,
+                             expiresAt: BilibiliParsing.expiry(stream.url))
+    }
+
+    /// 取回可用于选轨的 playurl `data`。把「空音轨」当成一次独立的失败来对待：
+    ///
+    /// 1. DASH 请求最多 3 次（对齐 Android `getAllAudioStreams` 的 `EMPTY_AUDIO_RETRY_COUNT`），
+    ///    逐次退避 250/500ms。每次重试都重新走签名 —— `wts` 过期本身也可能是被拒的原因之一，
+    ///    复用上一次的签名串会让重试失去意义。
+    /// 2. 「空」的定义与 Android `shouldRetryEmptyAudioFetch` 一致：dash audio / dolby / flac
+    ///    一条都没有；单条 durl 会被 `candidateStreams` 当成可播音轨，因此直接返回不重试。
+    ///    （地址全非法的极端情况也会被判空，这与 Android 略有差异，但重试比把坏 URL 交给播放器更好。）
+    /// 3. 仍然没有音轨时，用 `fnval=0&platform=html5&high_quality=1` 再请求一次拿渐进式 durl。
+    ///    这条路径同样要带 gaia_source，否则回退请求自己也会被风控挡掉。
+    private func audioPlayData(bvid: String, cid: String) async throws -> [String: Any] {
+        var lastData: [String: Any] = [:]
+        for attempt in 1...Self.emptyAudioRetryCount {
+            try Task.checkCancellation()
+            let data = try await api("/x/player/wbi/playurl",
+                                     parameters: Self.dashParameters(bvid: bvid, cid: cid), signed: true)
+            if !BilibiliParsing.candidateStreams(in: data).isEmpty { return data }
+            lastData = data
+            if attempt < Self.emptyAudioRetryCount {
+                Log.net.warning("Bilibili playurl 未返回音轨，重试 \(attempt, privacy: .public)/\(Self.emptyAudioRetryCount, privacy: .public)")
+                try await Task.sleep(nanoseconds: Self.emptyAudioRetryDelayNanoseconds * UInt64(attempt))
+            }
+        }
+        try Task.checkCancellation()
+        let fallback = try await api("/x/player/wbi/playurl",
+                                     parameters: Self.html5FallbackParameters(bvid: bvid, cid: cid), signed: true)
+        return BilibiliParsing.candidateStreams(in: fallback).isEmpty ? lastData : fallback
+    }
+
+    /// DASH 请求参数：fnval=272 即 DASH(16) | Dolby(256)，与 Android FNVAL_DASH|FNVAL_DOLBY 一致。
+    private static func dashParameters(bvid: String, cid: String) -> [String: String] {
+        ["bvid": bvid, "cid": cid, "fnval": "272", "fnver": "0", "fourk": "0",
+         "otype": "json", "platform": "pc", "gaia_source": gaiaSource]
+    }
+
+    /// html5 渐进式回退参数：与 Android `buildHtml5FallbackOptions` 一致（fnval=0、high_quality=1）。
+    private static func html5FallbackParameters(bvid: String, cid: String) -> [String: String] {
+        ["bvid": bvid, "cid": cid, "fnval": "0", "fnver": "0", "fourk": "0",
+         "otype": "json", "platform": "html5", "high_quality": "1", "gaia_source": gaiaSource]
     }
 
     public func account() async throws -> OnlineAccount {

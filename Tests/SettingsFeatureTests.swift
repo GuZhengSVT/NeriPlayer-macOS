@@ -366,4 +366,101 @@ final class SettingsFeatureTests: XCTestCase {
         viewModel.refreshDirectories()
         XCTAssertEqual(viewModel.directories.count, 1)
     }
+
+    // MARK: - 5. 在线音质（问题 3）
+
+    /// 三个平台的档位写入后都能被「重新读一遍存储」的实例读回（key 与 rawValue 都对）。
+    func testAudioQualityPersistsForEachPlatform() {
+        let settings = makeSettings()
+        let viewModel = SettingsViewModel(settings: settings)
+
+        viewModel.setNeteaseQuality(.lossless)
+        viewModel.setYouTubeMusicQuality(.veryHigh)
+        viewModel.setBilibiliQuality(.dolby)
+
+        // 落盘的必须是 rawValue（YouTube 的 veryHigh 是 "very_high"，不是枚举名）。
+        XCTAssertEqual(settings.value(for: SettingsKeys.neteaseAudioQuality), "lossless")
+        XCTAssertEqual(settings.value(for: SettingsKeys.youtubeMusicAudioQuality), "very_high")
+        XCTAssertEqual(settings.value(for: SettingsKeys.bilibiliAudioQuality), "dolby")
+
+        // 重新读存储：新实例（新的 SettingsViewModel 与新的 AudioQualityPreferences）看到同样的值。
+        let reloaded = SettingsViewModel(settings: settings)
+        XCTAssertEqual(reloaded.neteaseQuality, .lossless)
+        XCTAssertEqual(reloaded.youtubeMusicQuality, .veryHigh)
+        XCTAssertEqual(reloaded.bilibiliQuality, .dolby)
+
+        let preferences = AudioQualityPreferences(settings: settings)
+        XCTAssertEqual(preferences.netease, .lossless)
+        XCTAssertEqual(preferences.youtubeMusic, .veryHigh)
+        XCTAssertEqual(preferences.bilibili, .dolby)
+    }
+
+    /// 未设置过时是各平台的默认档位（exhigh / high / high），不会写成空值。
+    func testAudioQualityDefaultsMatchPlatformDefaults() {
+        let settings = makeSettings()
+        let viewModel = SettingsViewModel(settings: settings)
+
+        XCTAssertEqual(viewModel.neteaseQuality, .exhigh)
+        XCTAssertEqual(viewModel.youtubeMusicQuality, .high)
+        XCTAssertEqual(viewModel.bilibiliQuality, .high)
+        XCTAssertFalse(settings.contains(SettingsKeys.neteaseAudioQuality), "只读不该写设置")
+    }
+
+    /// 垃圾值（手工改坏 / 版本不兼容）读回平台默认档位，而不是抛错或让设置页打不开。
+    func testGarbageAudioQualityFallsBackToPlatformDefaults() {
+        let settings = makeSettings()
+        settings.set("bogus", for: SettingsKeys.neteaseAudioQuality)
+        settings.set("bogus", for: SettingsKeys.youtubeMusicAudioQuality)
+        settings.set("bogus", for: SettingsKeys.bilibiliAudioQuality)
+
+        XCTAssertEqual(NeteaseQuality(stored: "bogus"), .default)
+        XCTAssertEqual(YouTubeQuality(stored: "bogus"), .default)
+        XCTAssertEqual(BilibiliQuality(stored: "bogus"), .default)
+
+        let viewModel = SettingsViewModel(settings: settings)
+        XCTAssertEqual(viewModel.neteaseQuality, .exhigh)
+        XCTAssertEqual(viewModel.youtubeMusicQuality, .high)
+        XCTAssertEqual(viewModel.bilibiliQuality, .high)
+    }
+
+    /// 取同一个档位时不做无谓写入（与外观 / 强调色的取舍一致）。
+    func testSettingSameAudioQualityDoesNotWrite() {
+        let settings = makeSettings()
+        let viewModel = SettingsViewModel(settings: settings)
+
+        viewModel.setNeteaseQuality(NeteaseQuality.default)
+        viewModel.setYouTubeMusicQuality(YouTubeQuality.default)
+        viewModel.setBilibiliQuality(BilibiliQuality.default)
+
+        XCTAssertFalse(settings.contains(SettingsKeys.neteaseAudioQuality))
+        XCTAssertFalse(settings.contains(SettingsKeys.youtubeMusicAudioQuality))
+        XCTAssertFalse(settings.contains(SettingsKeys.bilibiliAudioQuality))
+    }
+
+    /// 别处（备份恢复 / 其他入口）直接写存储时，视图模型通过变更流同步到本地副本。
+    ///
+    /// 只改一个键也只会刷新对应的那一个属性：三个键各自独立，不该互相带动。
+    func testViewModelObservesExternallyWrittenAudioQuality() async {
+        let settings = makeSettings()
+        let viewModel = SettingsViewModel(settings: settings)
+        XCTAssertEqual(viewModel.bilibiliQuality, .high)
+
+        // 观察者任务要先真正开始消费变更流，之后的写入才会被收到。
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        settings.set(BilibiliQuality.low.rawValue, for: SettingsKeys.bilibiliAudioQuality)
+
+        let reflected = await waitUntil { viewModel.bilibiliQuality == .low }
+        XCTAssertTrue(reflected, "直接写存储后视图模型应同步为 low，实际为 \(viewModel.bilibiliQuality)")
+        XCTAssertEqual(viewModel.neteaseQuality, .exhigh, "其他平台的档位不该被带动")
+    }
+
+    /// 等待一个主线程条件成立，超时返回最后一次结果（避免用例因观察者未调度而挂起）。
+    private func waitUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return condition()
+    }
 }

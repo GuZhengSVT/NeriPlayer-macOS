@@ -60,6 +60,19 @@ struct NeteaseSearchResponse: Decodable {
 struct NeteaseSongDetailResponse: Decodable { let songs: [NeteaseSongResponse]? }
 struct NeteaseAlbumResponse: Decodable { let songs: [NeteaseSongResponse]? }
 struct NeteaseTrialResponse: Decodable { }
+/// 诊断用的宽松字符串：缺失、null、类型不符都退化成 nil。
+///
+/// 为什么不用 `String?`：这两个字段纯粹是拿来写日志的，而 `Item` 上任何一个字段解码失败
+/// 都会让整段音源响应变成 `invalidResponse`（进而报「没有可用音源」）。
+/// 与 `NeteaseFlexibleInt` 同一个理由：不让一个诊断字段毁掉播放。
+struct NeteaseLooseString: Decodable {
+    let value: String?
+    init(from decoder: Decoder) throws {
+        guard let container = try? decoder.singleValueContainer() else { value = nil; return }
+        let text = (try? container.decode(String.self))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        value = (text?.isEmpty == false) ? text : nil
+    }
+}
 struct NeteaseAudioResponse: Decodable {
     struct Item: Decodable {
         let id: NeteaseIdentifier?
@@ -67,6 +80,11 @@ struct NeteaseAudioResponse: Decodable {
         let url: String?
         let expi: Double?
         let freeTrialInfo: NeteaseTrialResponse?
+        /// 服务端**实际**返回的档位。可能与请求的 `level` 不同（会员/版权不足时服务端会自行降级），
+        /// 只用于日志诊断「选了无损却没拿到无损」，不参与选轨。
+        let level: NeteaseLooseString?
+        /// 服务端实际下发的容器（例如 "mp3" / "flac"），用于确认 `encodeType` 选择是否生效。
+        let type: NeteaseLooseString?
     }
     let data: [Item]?
 }

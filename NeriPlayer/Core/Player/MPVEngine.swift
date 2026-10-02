@@ -54,10 +54,51 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
     /// 创建引擎并开始桥接内核属性。
     /// - Parameters:
     ///   - clientName: 仅用于日志区分同进程内的多个实例。
-    ///   - options: mpv 启动选项（见 MPVLaunchOption）。测试夹具传 `.silentAudio` 以免真机出声。
-    public init(clientName: String = "NeriPlayer.Engine", options: [MPVLaunchOption] = []) throws {
-        controller = try MPVController(clientName: clientName, options: options)
+    ///   - options: 额外的 mpv 启动选项（见 MPVLaunchOption）。测试夹具传 `.silentAudio` 以免真机出声。
+    ///     注意这些选项会与 `MPVLaunchOption.audioOnly` **合并**而不是替换它，见 `mergedLaunchOptions`。
+    public init(
+        clientName: String = "NeriPlayer.Engine",
+        options: [MPVLaunchOption] = MPVLaunchOption.audioOnly
+    ) throws {
+        controller = try MPVController(clientName: clientName, options: MPVEngine.mergedLaunchOptions(options))
         startObserving()
+    }
+
+    // MARK: - 启动选项
+
+    /// 把调用方给的启动选项并入音频专用基线。
+    ///
+    /// 语义（三条都有测试钉住）：
+    ///   1) 基线永远是 `MPVLaunchOption.audioOnly`：即使调用方传空数组或只传 `.silentAudio`，
+    ///      「不建窗、不渲染视频轨」的保证也不会丢。默认参数写 `audioOnly` 只是让签名自解释；
+    ///      真正兜底的是这里的合并 —— 显式传 `[]` 的调用方同样拿到基线；
+    ///   2) 同名冲突时**调用方赢**（它是后写入的），否则测试想覆盖基线里的某一项就做不到；
+    ///   3) 同名项只保留一条，且沿用第一次出现的顺序。mpv 只认最后一条值，但重复项会让
+    ///      启动日志与回读属性难以对照，所以在下发之前就归并掉。
+    static func mergedLaunchOptions(_ options: [MPVLaunchOption]) -> [MPVLaunchOption] {
+        var merged = MPVLaunchOption.audioOnly
+        var indexByName: [String: Int] = [:]
+        for (index, option) in merged.enumerated() {
+            indexByName[option.name] = index
+        }
+        for option in options {
+            if let index = indexByName[option.name] {
+                merged[index] = option
+            } else {
+                indexByName[option.name] = merged.count
+                merged.append(option)
+            }
+        }
+        return merged
+    }
+
+    /// 读回一条 mpv 属性，仅供本模块内的测试验证启动选项是否真的在 `mpv_initialize` 之前生效。
+    ///
+    /// 为什么开这一扇最小的窗：引擎的对外契约是 PlayerEngine，把整个 MPVController 交出去会让
+    /// 调用方绕过状态机直接改内核；而「`audio-display=no` / `vid=no` 到底有没有生效」只能在真机上
+    /// 回读内核属性来证明 —— 与 MPVControllerTests 里静音选项的验证方式一致。
+    func readBackProperty(_ name: String) throws -> String {
+        try controller.getString(name)
     }
 
     deinit {
@@ -273,6 +314,22 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
             mutate {
                 $0.hasLoadedFile = false
                 $0.hasEnded = reachedEOF
+                $0.isCoreIdle = true
+            }
+        case .quit(let entryID):
+            // mpv 自己终止了这个文件（MPV_END_FILE_REASON_QUIT）：quit 命令、或播放器关闭 ——
+            // 用户关掉 mpv 自己开的封面窗口走的就是这条。既不是自然播完，也不是解码失败。
+            //
+            // 刻意不在这里做自动恢复：音频专用配置（`MPVLaunchOption.audioOnly`）已经堵住了
+            // 「关窗」这条路径，而在应用里主动停止同样会走到这里 —— 自动重播会让主动停止与
+            // 意外中断变得无法区分。只把状态收干净（卸载、不置 hasEnded，因此队列不会推进），
+            // 并留一条可检索的日志：这条日志若在音频专用配置下再次出现，说明 mpv 那边又有了
+            // 新的、app 不知情的终止来源。
+            guard entryID == currentEntryID else { return }
+            Log.player.info("mpv 终止了文件（reason=QUIT）：entry=\(entryID, privacy: .public)，不做自动恢复")
+            mutate {
+                $0.hasLoadedFile = false
+                $0.hasEnded = false
                 $0.isCoreIdle = true
             }
         case .failed(let entryID, let errorCode):

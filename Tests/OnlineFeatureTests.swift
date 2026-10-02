@@ -159,6 +159,84 @@ final class OnlineFeatureTests: XCTestCase {
         XCTAssertEqual(second.throttling, "nok")
         XCTAssertNotNil(YouTubeMusicSolverAssets.bundled())
     }
+
+    // MARK: 需求 3：音质档位的纯逻辑（无网络、无 UI）
+    //
+    // 冻结类型（枚举档位、降级链、AudioQualityPreferences）本身的单测在
+    // Tests/PlaybackQualityTests.swift 里；这里只补**客户端这一侧**依赖的那部分语义：
+    // 客户端的 bit/s → kbps 换算、以及「设置项被手改坏」时读取路径必须回落而不是抛错。
+
+    /// YouTube 档位的码率边界。阈值与 Android 的 `inferYouTubeQualityKeyFromBitrate` 一致：
+    /// 96 / 128 / 160 kbps，未知码率按最低档处理。
+    func testYouTubeQualityInferenceBoundaries() {
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: nil), .low)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 0), .low)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 95), .low)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 96), .medium)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 127), .medium)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 128), .high)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 159), .high)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 160), .veryHigh)
+        XCTAssertEqual(YouTubeQuality.infer(bitrateKbps: 320), .veryHigh)
+    }
+
+    /// YouTube 响应里的 `bitrate` 是 bit/s，客户端必须先换算成 kbps 再归类：
+    /// 边界值 127_999 bit/s 若被当成 127999 kbps 就会误判成 very_high。
+    func testYouTubeClientConvertsBitsPerSecondBeforeInferring() {
+        func format(_ bits: Int) -> [String: Any] { ["bitrate": bits, "mimeType": "audio/webm"] }
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: format(127_999)), .medium)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: format(128_000)), .high)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: format(159_999)), .high)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: format(160_000)), .veryHigh)
+        // 缺字段或 0 按未知处理（low），而不是崩掉或错判成高档。
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: ["mimeType": "audio/webm"]), .low)
+        XCTAssertEqual(YouTubeMusicClient.inferredQuality(for: format(0)), .low)
+    }
+
+    /// 设置项被手改坏（乱码/空串）或整个缺失时都必须回落到各平台默认值，而不是抛错或崩掉。
+    /// 默认值同时要和 SettingsKeys 声明的默认值一致 —— 否则设置页显示的和播放时用的会不是一回事。
+    func testAudioQualityPreferencesFallBackOnGarbageOrMissingValues() throws {
+        let name = "moe.ouom.NeriPlayer.tests." + UUID().uuidString
+        let suite = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { suite.removePersistentDomain(forName: name) }
+        let store = SettingsStore(userDefaults: suite)
+
+        // 缺失：全部走冻结默认值，且与设置键的默认值一致。
+        XCTAssertNil(suite.object(forKey: SettingsKeys.neteaseAudioQuality.name))
+        XCTAssertEqual(AudioQualityPreferences(settings: store),
+                       AudioQualityPreferences(netease: .exhigh, youtubeMusic: .high, bilibili: .high))
+        XCTAssertEqual(SettingsKeys.neteaseAudioQuality.defaultValue, NeteaseQuality.default.rawValue)
+        XCTAssertEqual(SettingsKeys.youtubeMusicAudioQuality.defaultValue, YouTubeQuality.default.rawValue)
+        XCTAssertEqual(SettingsKeys.bilibiliAudioQuality.defaultValue, BilibiliQuality.default.rawValue)
+
+        // 乱码 / 空串：同样回落，且不抛错。
+        store.set("lossless-ultra-9000", for: SettingsKeys.neteaseAudioQuality)
+        store.set("💥", for: SettingsKeys.youtubeMusicAudioQuality)
+        store.set("", for: SettingsKeys.bilibiliAudioQuality)
+        XCTAssertEqual(AudioQualityPreferences(settings: store),
+                       AudioQualityPreferences(netease: .exhigh, youtubeMusic: .high, bilibili: .high))
+
+        // 合法值照常解析，确保上面的回落不是因为读取路径坏了。
+        store.set("jymaster", for: SettingsKeys.neteaseAudioQuality)
+        store.set("very_high", for: SettingsKeys.youtubeMusicAudioQuality)
+        store.set("dolby", for: SettingsKeys.bilibiliAudioQuality)
+        XCTAssertEqual(AudioQualityPreferences(settings: store),
+                       AudioQualityPreferences(netease: .jymaster, youtubeMusic: .veryHigh, bilibili: .dolby))
+    }
+
+    /// 生产路径的 provider 必须每次重新读设置：用户改完立刻对下一次解析生效。
+    func testAudioQualityProviderReadsLiveSettings() throws {
+        let name = "moe.ouom.NeriPlayer.tests." + UUID().uuidString
+        let suite = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { suite.removePersistentDomain(forName: name) }
+        let store = SettingsStore(userDefaults: suite)
+        let provider = AudioQualityProvider { AudioQualityPreferences(settings: store) }
+        XCTAssertEqual(provider.preferences().netease, .exhigh)
+        store.set("hires", for: SettingsKeys.neteaseAudioQuality)
+        // 同一个 provider 立即看到新值 —— 「每次解析重新读」的语义就靠这一点。
+        XCTAssertEqual(provider.preferences().netease, .hires)
+        XCTAssertEqual(AudioQualityProvider.fixed(AudioQualityPreferences(youtubeMusic: .low)).preferences().youtubeMusic, .low)
+    }
 }
 
 @MainActor

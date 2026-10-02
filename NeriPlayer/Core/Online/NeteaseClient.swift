@@ -10,22 +10,34 @@ public actor NeteaseClient: OnlineMusicClient {
     private let baseURL: URL
     private let pageSize = 30
     private let qrLogin: NeteaseQRLoginClient
+    /// 音质偏好读取入口。默认 `.settings`：每次解析都重新读设置，用户改完立即生效。
+    private let qualityProvider: AudioQualityProvider
+    /// 仅测试注入：记录每一次音质请求的决策（level/encodeType）。
+    /// eAPI 请求体是加密的，URLProtocol 层看不到明文，所以由客户端自己回调决策结果。
+    private let requestObserver: (@Sendable (NeteaseAudioRequestPlan) -> Void)?
     private var playlistTrackIDs: [String: [String]] = [:]
 
     public init(
         session: URLSession = .shared,
         sessions: OnlineSessionStore = .shared,
-        baseURL: URL = URL(string: "https://music.163.com") ?? URL(fileURLWithPath: "/")
+        baseURL: URL = URL(string: "https://music.163.com") ?? URL(fileURLWithPath: "/"),
+        quality: AudioQualityProvider = .settings
     ) {
         self.session = session
         self.sessions = sessions
         self.baseURL = baseURL
+        self.qualityProvider = quality
+        requestObserver = nil
         qrLogin = NeteaseQRLoginClient(session: session, sessions: sessions, baseURL: baseURL)
     }
 
     init(session: URLSession, sessions: OnlineSessionStore, baseURL: URL,
-         deviceProvider: any NeteaseDeviceContextProviding) {
+         deviceProvider: any NeteaseDeviceContextProviding,
+         quality: AudioQualityProvider = .settings,
+         requestObserver: (@Sendable (NeteaseAudioRequestPlan) -> Void)? = nil) {
         self.session = session; self.sessions = sessions; self.baseURL = baseURL
+        self.qualityProvider = quality
+        self.requestObserver = requestObserver
         qrLogin = NeteaseQRLoginClient(session: session, sessions: sessions, baseURL: baseURL, deviceProvider: deviceProvider)
     }
 
@@ -56,19 +68,78 @@ public actor NeteaseClient: OnlineMusicClient {
     public func resolve(song: SongData) async throws -> ResolvedAudio {
         guard song.source == .netease else { throw OnlineError.invalidInput("歌曲来源不匹配") }
         let id = try Self.validID(song.sourceID)
-        let response: NeteaseAudioResponse = try await post("/eapi/song/enhance/player/url/v1", payload: [
-            "ids": "[\(id)]", "level": "standard", "encodeType": "aac"
-        ], eapi: true)
-        guard let item = response.data?.first(where: { $0.id?.value == String(id) }),
-              item.code == nil || item.code == 200, item.freeTrialInfo == nil,
-              let string = item.url, let url = URL(string: string),
-              ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
-            throw OnlineError.unavailable("网易云未返回完整可播放音源，可能需要登录或会员权限")
+        // 每次解析都重新读偏好：设置页改完立刻对下一次解析生效，且不把偏好缓存在构造时。
+        let preferred = qualityProvider.preferences().netease
+        // 只记住「在哪个档位拿到过试听片段」，用于把最终错误描述得更准确。
+        // 刻意不保存试听 URL：既然不返回给播放链路，留着它只会让人误以为会被用到。
+        var previewLevel: NeteaseQuality?
+        // 降级链由冻结接口给出（jymaster → … → standard），与 Android 的
+        // NETEASE_QUALITY_FALLBACK_ORDER 完全一致，这里只负责按序请求。
+        for level in preferred.degradeChain {
+            // 切歌/停止会取消解析；每个候选项开始前都检查一次，避免把整条链跑完。
+            try Task.checkCancellation()
+            let plan = Self.audioRequestPlan(for: level)
+            requestObserver?(plan)
+            let response: NeteaseAudioResponse = try await post("/eapi/song/enhance/player/url/v1", payload: [
+                "ids": "[\(id)]", "level": plan.level, "encodeType": plan.encodeType
+            ], eapi: true)
+            try Task.checkCancellation()
+            guard let item = response.data?.first(where: { $0.id?.value == String(id) }),
+                  let url = Self.playbackURL(item) else { continue }
+            // 试听片段只作最后的兜底：Android 拿到 freeTrialInfo 后仍会把更低的档位全部试完，
+            // 只有全都拿不到完整音源时才回退到试听。这里保持一致 —— 但**不**自动播放试听：
+            // 需求明确要求不能悄悄播 30 秒片段，所以「全链路只有试听」时宁可报错，
+            // 并把「在哪个档位只拿到试听」写进错误信息，让用户知道该去登录/开会员。
+            if item.freeTrialInfo != nil {
+                previewLevel = previewLevel ?? level
+                Log.net.info("网易云当前音质仅返回试听片段，继续尝试更低音质")
+                continue
+            }
+            // 服务端可能在会员/版权不足时自行降级，记录实际档位与容器便于定位「选了无损却没拿到无损」。
+            if let resolved = item.level?.value, resolved != plan.level {
+                Log.net.info("网易云降级：\(plan.level, privacy: .public)→\(resolved, privacy: .public) \(item.type?.value ?? "", privacy: .public)")
+            }
+            return ResolvedAudio(song: song, url: url, headers: Self.playbackHeaders, expiresAt: Self.expiry(for: item))
         }
-        let lifetime = item.expi.flatMap { $0 > 0 ? min($0, 86_400) : nil }
-        return ResolvedAudio(song: song, url: url, headers: ["Referer": "https://music.163.com/"],
-                             expiresAt: lifetime.map { Date().addingTimeInterval($0) })
+        if let previewLevel {
+            throw OnlineError.unavailable("网易云在 \(previewLevel.rawValue) 及以下档位仅返回试听片段，可能需要登录或会员权限")
+        }
+        throw OnlineError.unavailable("网易云未返回完整可播放音源，可能需要登录或会员权限")
     }
+
+    /// 一次音质请求的决策结果。`level` 即用户偏好的原值，`encodeType` 随档位变化。
+    struct NeteaseAudioRequestPlan: Sendable, Equatable {
+        let level: String
+        let encodeType: String
+    }
+
+    /// 提取成纯函数以便单测：eAPI 请求体是加密的，测试无法从请求里读出 `level`，
+    /// 只能直接验证这段决策逻辑。
+    ///
+    /// 为什么无损及以上必须用 `flac`：网易云的 `encodeType` 是**容器**选择，不是音质档位。
+    /// 请求 `level=lossless&encodeType=aac` 会拿到降级后的 AAC，等于用户选了无损却听不到无损；
+    /// Android 的 `getSongDownloadUrl` 对无损及以上固定传 `encodeType = "flac"`，此处对齐。
+    static func audioRequestPlan(for quality: NeteaseQuality) -> NeteaseAudioRequestPlan {
+        NeteaseAudioRequestPlan(
+            level: quality.rawValue,
+            encodeType: quality.requiresMembership ? "flac" : "aac"
+        )
+    }
+
+    /// 响应条目是否含有可播放的完整 URL（`code` 为 200 或缺省，且 scheme/host 合法）。
+    private static func playbackURL(_ item: NeteaseAudioResponse.Item) -> URL? {
+        guard item.code == nil || item.code == 200, let string = item.url,
+              let url = URL(string: string),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
+        return url
+    }
+
+    /// `expi` 换算成到期时间；夹取到一天以内，避免服务端给出荒唐的长有效期。
+    private static func expiry(for item: NeteaseAudioResponse.Item) -> Date? {
+        item.expi.flatMap { $0 > 0 ? min($0, 86_400) : nil }.map { Date().addingTimeInterval($0) }
+    }
+
+    private static let playbackHeaders = ["Referer": "https://music.163.com/"]
 
     public func songs(in collection: OnlineCollection) async throws -> [SongData] {
         guard collection.source == .netease else { throw OnlineError.invalidInput("歌单来源不匹配") }
