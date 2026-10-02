@@ -15,7 +15,8 @@ final class PlayerBarRenderingTests: XCTestCase {
         defer { state.stopPlaybackIntegration() }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 84),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        let host = NSHostingView(rootView: FloatingPlayerBar(onLyrics: {}).environmentObject(state))
+        // 播放栏现在只需要一个「打开歌曲播放页」的回调；旧 onLyrics 入口已删除。
+        let host = NSHostingView(rootView: FloatingPlayerBar().environmentObject(state))
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
@@ -26,7 +27,8 @@ final class PlayerBarRenderingTests: XCTestCase {
             host.layoutSubtreeIfNeeded()
             let size = host.fittingSize
             XCTAssertLessThanOrEqual(size.width, width + 1, "播放器最小宽度不能把窗口撑大")
-            XCTAssertLessThanOrEqual(size.height, 90, "播放器应保持紧凑高度")
+            // 整改后封面放大到 72pt、进度条移到封面右侧，栏更高但仍有固定上界（防回归整栏变高）。
+            XCTAssertLessThanOrEqual(size.height, 130, "播放器应保持紧凑高度")
             heights.append(size.height)
             if let path = ProcessInfo.processInfo.environment["NERIPLAYER_PLAYER_CAPTURE_DIR"] {
                 let root = URL(fileURLWithPath: path)

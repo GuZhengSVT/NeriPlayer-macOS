@@ -39,10 +39,55 @@ private final class OnlineRequestCapture: @unchecked Sendable {
     func accept(_ token: UUID) { lock.lock(); defer { lock.unlock() }; latest = token }
     var token: UUID? { lock.lock(); defer { lock.unlock() }; return latest }
 }
+private actor FallbackCalls {
+    var events: [String] = []
+    func record(_ event: String) { events.append(event) }
+}
+private struct OrderedFallbackClient: OnlineMusicClient {
+    let source: MusicSource
+    let calls: FallbackCalls
+    var unavailable = false
+    func search(query: String, page: Int) async throws -> [SongData] {
+        await calls.record("search-" + source.rawValue)
+        return [SongData(source: source, sourceID: source.rawValue, title: "Song", artist: "Artist", duration: 180)]
+    }
+    func resolve(song: SongData) async throws -> ResolvedAudio {
+        await calls.record("resolve-" + source.rawValue)
+        if unavailable { throw OnlineError.unavailable("VIP or unavailable") }
+        return ResolvedAudio(song: song, url: URL(string: "https://cdn.example/audio")!)
+    }
+    func songs(in collection: OnlineCollection) async throws -> [SongData] { [] }
+    func recommendations() async throws -> [SongData] { [] }
+    func collections() async throws -> [OnlineCollection] { [] }
+}
 
 @MainActor
 final class OnlinePlaybackTests: XCTestCase {
     private var song: SongData { SongData(source: .netease, sourceID: "123", title: "Song", artist: "Artist", duration: 180) }
+    func testNeteaseFallbackTriesBilibiliBeforeSearchingYouTube() async throws {
+        for bilibiliUnavailable in [false, true] {
+            let calls = FallbackCalls()
+            let clients: [any OnlineMusicClient] = [
+                OrderedFallbackClient(source: .netease, calls: calls, unavailable: true),
+                OrderedFallbackClient(source: .bilibili, calls: calls, unavailable: bilibiliUnavailable),
+                OrderedFallbackClient(source: .youtubeMusic, calls: calls)
+            ]
+            let store = PlaybackStateStore(engine: OnlineTestEngine())
+            let coordinator = OnlinePlaybackCoordinator(store: store, resolver: PlaybackResolver(clients: clients),
+                                                        searchManager: OnlineSearchManager(clients: clients))
+            let ready = expectation(description: "fallback playback")
+            let observation = coordinator.$phase.filter { $0 == .playing }.prefix(1).sink { _ in ready.fulfill() }
+            coordinator.play(song)
+            await fulfillment(of: [ready], timeout: 3)
+            XCTAssertEqual(coordinator.currentResolvedAudio?.song.source, bilibiliUnavailable ? .youtubeMusic : .bilibili)
+            let events = await calls.events
+            let expected = ["resolve-netease", "search-bilibili", "resolve-bilibili"]
+                + (bilibiliUnavailable ? ["search-youtubeMusic", "resolve-youtubeMusic"] : [])
+            XCTAssertEqual(events, expected)
+            coordinator.stop(); store.stop()
+            withExtendedLifetime(observation) {}
+        }
+    }
     func testStopRejectsLateResolution() throws {
         let engine = OnlineTestEngine(); let store = PlaybackStateStore(engine: engine)
         let capture = OnlineRequestCapture()

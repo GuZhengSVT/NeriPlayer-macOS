@@ -68,3 +68,6 @@ Pods/
 .vscode/
 *.swp
 *~
+
+# computer-use 截图产物（会话私有，不入库）
+.dsh-computer-use/

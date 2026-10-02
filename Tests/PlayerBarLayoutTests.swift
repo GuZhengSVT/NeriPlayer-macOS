@@ -27,16 +27,14 @@ final class PlayerBarLayoutTests: XCTestCase {
         let plan = PlayerBarLayout.plan(forWidth: PlayerBarLayout.regularThreshold)
         XCTAssertFalse(plan.isInline(.volume), "中档应先收起音量")
         XCTAssertTrue(plan.isInline(.mode))
-        XCTAssertTrue(plan.isInline(.lyrics))
         XCTAssertTrue(plan.isInline(.floatingLyrics))
         XCTAssertEqual(plan.collapsed, [.volume])
         XCTAssertTrue(plan.showsLyricLine, "中档仍保留歌词行")
     }
 
-    /// 紧凑档：音量 + 两条歌词入口都收进更多，且不再显示第二行。
+    /// 紧凑档：音量 + 桌面歌词入口都收进更多，且不再显示歌词行。
     func testCompactWindowCollapsesDisplayGroup() {
         let plan = PlayerBarLayout.plan(forWidth: PlayerBarLayout.compactThreshold)
-        XCTAssertFalse(plan.isInline(.lyrics))
         XCTAssertFalse(plan.isInline(.floatingLyrics))
         XCTAssertTrue(plan.isInline(.mode), "模式仍内联")
         XCTAssertTrue(plan.isInline(.favorite))
@@ -193,5 +191,78 @@ final class PlayerBarLayoutTests: XCTestCase {
         let song = SongData(source: .netease, sourceID: "1", title: "在线")
         XCTAssertFalse(CurrentTrackLibraryActions.isFavorited(song.track(), libraryTracks: [], favoriteIds: []),
                        "未入库的在线歌视为未收藏")
+    }
+
+    // MARK: - 进度条 seek 显示（需求 1：点击闪烁）
+
+    private let tolerance = 1.5
+
+    /// 引擎位置落到目标附近即算确认。
+    func testSeekConfirmedWithinTolerance() {
+        XCTAssertTrue(PlayerProgressSeekResolution.isConfirmed(pending: 100, position: 100.5, tolerance: tolerance))
+        XCTAssertTrue(PlayerProgressSeekResolution.isConfirmed(pending: 100, position: 98.5, tolerance: tolerance),
+                      "差正好等于容差应算到位（闭区间）")
+        XCTAssertFalse(PlayerProgressSeekResolution.isConfirmed(pending: 100, position: 90, tolerance: tolerance))
+    }
+
+    /// 拿不到可信数字（NaN/∞）时按已确认处理，交给引擎 —— 否则进度条会永久停在算不出的目标上。
+    func testSeekNonFiniteValuesCountAsConfirmed() {
+        XCTAssertTrue(PlayerProgressSeekResolution.isConfirmed(pending: .nan, position: 10, tolerance: tolerance))
+        XCTAssertTrue(PlayerProgressSeekResolution.isConfirmed(pending: 10, position: .nan, tolerance: tolerance))
+        XCTAssertTrue(PlayerProgressSeekResolution.isConfirmed(pending: .infinity, position: 10, tolerance: tolerance))
+    }
+
+    /// **核心防闪烁用例**：seek 已提交但引擎尚未走到目标时，必须继续显示目标值而不是回退到旧位置。
+    func testPendingSeekHoldsTargetInsteadOfFallingBack() {
+        let resolution = PlayerProgressSeekResolution.resolve(
+            scrub: nil, pending: 100, position: 3, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(resolution.displayPosition, 100, "引擎还没到位时应显示 seek 目标，不能回退成 3")
+        XCTAssertFalse(resolution.isConfirmed)
+    }
+
+    /// 拖动值优先级最高：用户手指的位置永远压过 seek 目标。
+    func testScrubValueOutranksPendingSeek() {
+        let resolution = PlayerProgressSeekResolution.resolve(
+            scrub: 10, pending: 100, position: 0, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(resolution.displayPosition, 10)
+        XCTAssertFalse(resolution.isConfirmed, "seek 目标尚未被引擎确认")
+    }
+
+    /// 确认之后交回引擎位置，进度条不会停在旧的 seek 目标上不动。
+    func testConfirmedSeekFallsBackToEnginePosition() {
+        let resolution = PlayerProgressSeekResolution.resolve(
+            scrub: nil, pending: 100, position: 100.4, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(resolution.displayPosition, 100.4)
+        XCTAssertTrue(resolution.isConfirmed)
+    }
+
+    /// 没有待确认 seek 时就是引擎位置本身。
+    func testNoPendingSeekUsesEnginePosition() {
+        let resolution = PlayerProgressSeekResolution.resolve(
+            scrub: nil, pending: nil, position: 42, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(resolution.displayPosition, 42)
+        XCTAssertTrue(resolution.isConfirmed)
+    }
+
+    /// 显示值被钳到 0...duration：负值不出现，超过时长不越界。
+    func testResolvedPositionIsClamped() {
+        let below = PlayerProgressSeekResolution.resolve(
+            scrub: -5, pending: nil, position: 10, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(below.displayPosition, 0)
+
+        let above = PlayerProgressSeekResolution.resolve(
+            scrub: 999, pending: nil, position: 10, duration: 200, tolerance: tolerance)
+        XCTAssertEqual(above.displayPosition, 200)
+    }
+
+    /// 时长未知（0/非有限）时不设上界，只保证不为负 —— 换歌初期时长还没出来时不能把目标钳成 0。
+    func testUnknownDurationDoesNotClampTarget() {
+        let resolution = PlayerProgressSeekResolution.resolve(
+            scrub: nil, pending: 120, position: 0, duration: 0, tolerance: tolerance)
+        XCTAssertEqual(resolution.displayPosition, 120, "时长未出时不应把 seek 目标钳掉")
+
+        let nonFinite = PlayerProgressSeekResolution.resolve(
+            scrub: nil, pending: 120, position: 0, duration: .nan, tolerance: tolerance)
+        XCTAssertEqual(nonFinite.displayPosition, 120)
     }
 }

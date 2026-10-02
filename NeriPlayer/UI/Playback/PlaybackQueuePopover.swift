@@ -98,6 +98,11 @@ struct PlaybackQueuePopover: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(isCurrent ? Color.accentColor : Color.clear)
                 .frame(width: 3, height: 22)
+            // 需求 10：有平台身份的曲目显示封面缩略图，Bilibili 走 16:9 横向容器并完整显示原图。
+            // 本地曲没有在线身份，保持原来的纯文字行，不给每一首都塞一个占位方块。
+            if let song = track.onlineSong {
+                OnlineArtworkThumbnail(url: song.artworkURL, platform: song.source, height: 30)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(track.title).lineLimit(1)
                     .font(isCurrent ? .callout.weight(.semibold) : .callout)

@@ -10,12 +10,23 @@ struct KaraokeText: NSViewRepresentable {
     let fontSize: Double
     var alignment: KaraokeAlignment = .start
     @Environment(\.colorScheme) private var colorScheme
+    /// 统一字体设置（需求 5）。逐字高亮在 AppKit 侧排字，必须自己把歌词字体解析成 NSFont：
+    /// 环境值一变，SwiftUI 会重新调用 updateNSView，字体随设置即时生效。
+    @Environment(\.appTypography) private var typography
+
+    /// 解析到真实 NSFont。逐字高亮一直是半粗体，所以不走 `lyricNSFont`（常规字重），
+    /// 而是直接复用 `AppTypography.resolve` 的三级家族解析，保持既有字重不变。
+    private func resolvedFont() -> NSFont {
+        AppTypography.resolve(family: typography.lyricsFontFamily, points: fontSize, weight: .semibold)
+            ?? NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+    }
 
     func makeNSView(context: Context) -> KaraokeTextView { KaraokeTextView() }
 
     func updateNSView(_ view: KaraokeTextView, context: Context) {
         view.configure(syllables: syllables, fontSize: fontSize, alignment: alignment,
-                       accent: NSColor(Color.accentColor), dark: colorScheme == .dark)
+                       accent: NSColor(Color.accentColor), dark: colorScheme == .dark,
+                       font: resolvedFont())
         view.update(time: time, focused: focused)
     }
 
@@ -38,6 +49,7 @@ final class KaraokeTextView: NSView {
     private var alignment = KaraokeAlignment.start
     private var accent = NSColor.controlAccentColor
     private var dark = false
+    private var font = NSFont.systemFont(ofSize: 0, weight: .semibold)
     private var measuredWidth: CGFloat = -1
     private var measuredSize = CGSize.zero
     private var currentTime = 0
@@ -60,14 +72,16 @@ final class KaraokeTextView: NSView {
     required init?(coder: NSCoder) { nil }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func configure(syllables: [KaraokeSyllable], fontSize: Double, alignment: KaraokeAlignment, accent: NSColor, dark: Bool) {
+    func configure(syllables: [KaraokeSyllable], fontSize: Double, alignment: KaraokeAlignment,
+                   accent: NSColor, dark: Bool, font: NSFont) {
         guard self.syllables != syllables || self.fontSize != fontSize || self.alignment != alignment
-                || self.accent != accent || self.dark != dark else { return }
+                || self.accent != accent || self.dark != dark || self.font != font else { return }
         self.syllables = syllables
         self.fontSize = fontSize
         self.alignment = alignment
         self.accent = accent
         self.dark = dark
+        self.font = font
         var text = ""
         ranges = []
         for syllable in syllables {
@@ -81,7 +95,7 @@ final class KaraokeTextView: NSView {
         paragraph.alignment = alignment == .end ? .right : .left
         let foreground = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.45)
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: fontSize, weight: .semibold),
+            .font: font,
             .foregroundColor: foreground, .paragraphStyle: paragraph
         ]
         storage.setAttributedString(NSAttributedString(string: text, attributes: attributes))

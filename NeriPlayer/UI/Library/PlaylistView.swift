@@ -192,6 +192,9 @@ struct PlaylistDetailView: View {
     @EnvironmentObject private var appState: AppState
 
     @State private var selectedTrackID: UUID?
+    /// 行内「新建歌单…」待加入的曲目；非 nil 即弹出命名面板。
+    @State private var pendingNewPlaylistTrack: LibraryTrack?
+    @Environment(\.appTypography) private var typography
 
     var body: some View {
         VStack(spacing: 0) {
@@ -223,10 +226,10 @@ struct PlaylistDetailView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(playlist.name)
-                    .font(.headline)
+                    .font(typography.uiFont(size: 17, weight: .semibold))
                     .lineLimit(1)
-                Text("\(viewModel.playlistEntries.count) 首")
-                    .font(.caption)
+                Text("\(viewModel.playlistEntries.count) 首歌曲")
+                    .font(typography.uiFont(size: 13))
                     .foregroundStyle(.secondary)
             }
 
@@ -247,30 +250,29 @@ struct PlaylistDetailView: View {
             ForEach(Array(viewModel.playlistEntries.enumerated()), id: \.element.id) { index, track in
                 LibraryTrackRow(
                     track: track,
+                    // 需求 9：行放大到封面 56pt、标题 17pt；星标与「加入歌单」保持行内可见，
+                    // 星标按 isFavorited 显示当前状态，加入歌单列出真实本地歌单并带新建入口。
+                    titleSize: 17,
+                    coverSize: 56,
                     isFavorited: viewModel.isFavorited(track),
-                    onToggleFavorite: { viewModel.toggleFavorite(track) }
+                    onToggleFavorite: { viewModel.toggleFavorite(track) },
+                    playlists: viewModel.playlists,
+                    onAddToPlaylist: { viewModel.add(track, to: $0) },
+                    onNewPlaylist: { pendingNewPlaylistTrack = track }
                 )
                 .tag(Optional(track.id))
                 .contentShape(Rectangle())
+                // 双击仍以**整张歌单**入队，起点为被点行 —— 不因为行内多了按钮就退化成单曲播放。
                 .onTapGesture(count: 2) { play(from: index) }
-                .contextMenu {
-                    Button("播放") { play(from: index) }
-                        .disabled(appState.playbackStore == nil)
-                    Button("下一首播放") { appState.playbackStore?.enqueueNext(track.track) }
-                        .disabled(appState.playbackStore == nil)
-                    Divider()
-                    // 整单入口：与头部按钮同语义，方便在任意一行就地换整单。
-                    Button("播放全部") { playAll() }
-                        .disabled(appState.playbackStore == nil)
-                    Button("随机播放") { shuffleAll() }
-                        .disabled(appState.playbackStore == nil)
-                    Divider()
-                    Button("从歌单移除") { viewModel.removeFromOpenPlaylist(track) }
-                }
+                .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                .contextMenu { contextMenu(index: index, track: track) }
             }
             .onMove { source, destination in
                 viewModel.moveInOpenPlaylist(fromOffsets: source, toOffset: destination)
             }
+        }
+        .sheet(item: $pendingNewPlaylistTrack) { track in
+            NewPlaylistSheet(track: track, viewModel: viewModel)
         }
     }
 
@@ -294,6 +296,43 @@ struct PlaylistDetailView: View {
         let tracks = viewModel.playlistEntries.map(\.track)
         selectedTrackID = tracks[safe: index]?.id
         appState.playbackStore?.setQueue(tracks, startIndex: index)
+    }
+
+    /// 行右键菜单。拆成独立 @ViewBuilder 是为了让类型检查器不必在 List 的降级里
+    /// 顺带推断这一大段菜单 —— 直接内联在 `ForEach` 里编译会超时（编译器已验证）。
+    ///
+    /// 行内已经给了收藏与加入歌单，菜单里保留它们是为了与媒体库主列表的右键习惯一致：
+    /// 两处的动作集合应当相同，用户不必记住「哪个列表里能右键到哪里」。
+    @ViewBuilder
+    private func contextMenu(index: Int, track: LibraryTrack) -> some View {
+        let canPlay = appState.playbackStore != nil
+        Button("播放") { play(from: index) }
+            .disabled(!canPlay)
+        Button("下一首播放") { appState.playbackStore?.enqueueNext(track.track) }
+            .disabled(!canPlay)
+        Divider()
+        Button(viewModel.isFavorited(track) ? "取消收藏" : "添加到收藏") {
+            viewModel.toggleFavorite(track)
+        }
+        Menu("加入歌单") {
+            ForEach(viewModel.playlists) { target in
+                Button(target.name) { viewModel.add(track, to: target) }
+            }
+            if !viewModel.playlists.isEmpty { Divider() }
+            Button("新建歌单…") { pendingNewPlaylistTrack = track }
+        }
+        Divider()
+        // 整单入口：与头部按钮同语义，方便在任意一行就地换整单。
+        Button("播放全部") { playAll() }
+            .disabled(!canPlay)
+        Button("随机播放") { shuffleAll() }
+            .disabled(!canPlay)
+        Divider()
+        // 下载只对在线曲有意义（本地文件已经在本地）；本地条目下不渲染这一项。
+        if let song = track.track.onlineSong {
+            Button("下载") { appState.enqueueDownload(song) }
+        }
+        Button("从歌单移除") { viewModel.removeFromOpenPlaylist(track) }
     }
 
     private func playAll() {

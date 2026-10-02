@@ -1,20 +1,23 @@
 // PlayerBarLayout.swift
-// NeriPlayer macOS —— 底部播放器栏的分组、排序与「窄窗收进更多菜单」的纯逻辑。
+// NeriPlayer macOS —— 底部播放器栏的档位、按钮排序与「窄窗收进更多菜单」的纯逻辑。
 //
 // 为什么把布局决策从视图里拿出来：SwiftUI 的 body 一旦掺进「窗口多窄就隐藏哪个按钮」这类判断，
 // 就只能靠人眼看真实窗口来验证，改一个阈值要重跑一遍应用。这里把宽度映射成一份
-// PlayerBarLayoutPlan（哪些控件内联、哪些收进「更多」菜单），是纯函数，可脱离界面直接单测。
+// PlayerBarLayoutPlan（哪些控件内联、哪些收进「更多」菜单、文字行数），是纯函数，可脱离界面直接单测。
 //
-// 分组与排序（对应用户「先分组排序」的要求）：固定的组顺序决定视觉分区，同一组内按钮相邻且顺序稳定，
-// 不因窗口变窄而互相穿插：
-//   1) 传输组：上一首 / 播放暂停 / 下一首（核心操作，任何宽度都内联）；
-//   2) 模式组：一个播放模式按钮（顺序/列表循环/单曲循环/随机循环切换）；
-//   3) 收藏组：收藏当前曲、加入歌单；
-//   4) 展示组：歌词（主窗口）、悬浮歌词（桌面浮窗）；
-//   5) 队列组：队列（恒内联，它是打开真实队列列表的入口）；
-//   6) 音量组：应用音量条。
-// 收进更多菜单的次序固定为 音量 → 悬浮歌词 → 歌词 → 收藏/歌单 → 模式，窗口变窄时用户不会看到
-// 「这次收的是模式、下次收的是音量」这类跳跃。
+// 本轮（2026-10-03）排版规格：左信息 / 中控制 / 右动作三区，左右等宽使中区落在整窗水平中心。
+// 因此档位关心的不再是「信息列多宽」，而是「右侧动作区还剩几个按钮位」：
+//   * 传输组与队列入口**任何宽度都内联**（核心操作 + 打开真实队列列表的唯一入口）；
+//   * 右侧其余按钮共 8 个（模式、播完暂停、收藏、加入歌单、桌面歌词、音量、更多，加上恒在的队列），
+//     按同一优先级从窄到宽依次回归，窗口变窄时用户不会看到「这次收的是模式、下次收的是音量」。
+//   * 曲名下方还有一行「歌手 + 来源 + 规格」和一行当前歌词，最窄档只留标题，保证骨架不挤。
+//
+// 选单按钮顺序（也是「更多」菜单里的顺序）：
+//   音量为先 → 桌面歌词 → 加入歌单 → 收藏 → 播完暂停 → 模式。
+// 理由：音量有「更多」里的独立弹层可替代，最该先让位；模式与播完暂停是低频开关，最该留在栏上占位。
+//
+// 2026-10-03 歌曲播放页整改：删除「打开歌词页」按钮（旧 sheet 导航入口与主窗口 sheet 一并去掉），
+// 只保留桌面悬浮歌词入口；歌词改由播放页承载，因此本枚举不再有 .lyrics。
 
 import CoreGraphics
 
@@ -24,7 +27,6 @@ enum PlayerBarOptionalControl: String, CaseIterable {
     case pauseAfterCurrent
     case favorite
     case addToPlaylist
-    case lyrics
     case floatingLyrics
     case volume
 
@@ -35,8 +37,7 @@ enum PlayerBarOptionalControl: String, CaseIterable {
         case .pauseAfterCurrent: return "播完当前曲暂停"
         case .favorite: return "收藏"
         case .addToPlaylist: return "加入歌单"
-        case .lyrics: return "歌词"
-        case .floatingLyrics: return "悬浮歌词"
+        case .floatingLyrics: return "桌面悬浮歌词"
         case .volume: return "音量"
         }
     }
@@ -48,16 +49,13 @@ enum PlayerBarOptionalControl: String, CaseIterable {
 /// 视图按它决定把哪些控件放进 HStack、哪些放进更多菜单。
 struct PlayerBarLayoutPlan: Equatable {
 
-    /// 内联展示的可选控件，按上面的组顺序排列。
+    /// 内联展示的可选控件，按上面的顺序排列。
     var inline: [PlayerBarOptionalControl]
     /// 收进「更多」菜单的可选控件，按同一顺序排列。
     var collapsed: [PlayerBarOptionalControl]
-    /// 曲目文字区是否展示歌手行（很窄时只留标题，省一行高度）。
+    /// 曲目文字区是否展示「歌手 + 来源 + 音频规格」这一行（很窄时只留标题，省一行高度）。
     var showsArtistLine: Bool
-    /// 是否在信息区与大按钮之间的空白里展示当前歌词行。
-    ///
-    /// 歌词占据的是「中间 flexible 区域」：宽窗时它把曲目信息与右侧按钮之间的空白填满，
-    /// 窄窗没有多余空白时才收起，避免与控件抢位置。
+    /// 曲目文字区是否再展示一行「当前歌词」。窄档没有多余宽度时收起，避免与曲名抢位置。
     var showsLyricLine: Bool
 
     /// 某个可选控件是否内联。
@@ -67,23 +65,29 @@ struct PlayerBarLayoutPlan: Equatable {
 /// 播放器栏布局的纯函数集合。
 enum PlayerBarLayout {
 
-    /// 宽度档位阈值（点）。取值来自常见窗口尺寸的取舍：主窗口最小 720，常用 1024；
-    /// 阈值之间留出余量，避免在临界点反复抖动。
-    static let wideThreshold: CGFloat = 980
-    static let regularThreshold: CGFloat = 860
-    static let compactThreshold: CGFloat = 760
+    /// 中间控制区的固定宽度（点）。固定值（而不是 flexible）才能保证：
+    /// 左侧信息区与右侧动作区**等宽**时，中区的中心正好落在整窗水平中心，不随左右内容漂移。
+    /// 取值 320：进度行「44 + 320 中的进度条 + 44」在 320 内仍有约 220pt 的进度条长度，长度适中。
+    static let centerWidth: CGFloat = 320
+
+    /// 宽度档位阈值（点）。主窗口最小宽度 720，常用 1024–1440。
+    /// 阈值之间留出余量，避免在临界点来回抖动；档位抬高后不易触发，同时保留窄窗收起的兜底。
+    static let wideThreshold: CGFloat = 1120
+    static let regularThreshold: CGFloat = 980
+    static let compactThreshold: CGFloat = 840
 
     /// 由可用宽度给出布局方案。
     static func plan(forWidth width: CGFloat) -> PlayerBarLayoutPlan {
         let safeWidth = width.isFinite ? width : regularThreshold
 
-        // 从宽到窄的四档内联集合，逐级削减。
+        // 从宽到窄的四档内联集合。集合本身始终按档位单调收窄（窄档是宽档的子集），
+        // 保证 collapsed 单调递增（测试也断言了这一点）。
         let wide: [PlayerBarOptionalControl] = [
-            .mode, .pauseAfterCurrent, .favorite, .addToPlaylist, .lyrics, .floatingLyrics, .volume
+            .mode, .pauseAfterCurrent, .favorite, .addToPlaylist, .floatingLyrics, .volume
         ]
         let regular = wide.filter { $0 != .volume }
-        let compact = regular.filter { $0 != .floatingLyrics && $0 != .lyrics }
-        // 最窄档：模式与收藏也收进更多，栏上只留传输 + 队列 + 更多。
+        let compact = regular.filter { $0 != .floatingLyrics && $0 != .addToPlaylist }
+        // 最窄档：模式/收藏/播完暂停也收进更多，栏上只留传输 + 队列 + 更多。
         let narrow: [PlayerBarOptionalControl] = []
 
         let inline: [PlayerBarOptionalControl]

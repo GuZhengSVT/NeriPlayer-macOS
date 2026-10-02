@@ -82,6 +82,14 @@ public struct PlaybackResolver: Sendable {
             fallback.append(PlaybackCandidate(song: candidate, score: score))
         }
         fallback.sort {
+            // 需求 6：网易云不可播放时，先在 Bilibili 找同曲，再考虑 YouTube Music ——
+            // 不能只按匹配度排，否则 YouTube 的高分候选会抢在 Bilibili 前面。
+            // 同平台内仍然按匹配度排序，原有评分/时长过滤不受影响。
+            if song.source == .netease {
+                let leftPriority = $0.song.source == .bilibili ? 0 : 1
+                let rightPriority = $1.song.source == .bilibili ? 0 : 1
+                if leftPriority != rightPriority { return leftPriority < rightPriority }
+            }
             if $0.score.total != $1.score.total { return $0.score.total > $1.score.total }
             return $0.song.id < $1.song.id
         }

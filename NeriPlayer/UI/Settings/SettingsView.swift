@@ -57,6 +57,19 @@ enum SettingsDestination {
     case downloads
 }
 
+/// 设置页使用的文字尺寸（相对 14pt UI 基准）。
+///
+/// 为什么集中成常量：设置页原本散落 `font(.caption)/.headline/.title2` 这类语义字体，
+/// 它们会覆盖根字体，不受「UI 字体 / UI 基础字号」影响。改为 `typography.uiFont(size:)`
+/// 后，尺寸语义仍要可读、可统一调整，于是收成这一组常量。
+enum SettingsTextSize {
+    static let caption: CGFloat = 11
+    static let body: CGFloat = 14
+    static let callout: CGFloat = 13
+    static let headline: CGFloat = 15
+    static let title: CGFloat = 20
+}
+
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     var syncViewModel: SyncViewModel?
@@ -68,6 +81,9 @@ struct SettingsView: View {
     /// 打开搜索 / 下载页的导航回调。由 MainContentView 注入；未注入时相关按钮不显示。
     var onNavigate: ((SettingsDestination) -> Void)?
     @Environment(\.openWindow) private var openWindow
+    /// 当前生效的字体设置（根视图注入）。外观页的「实时预览」用它渲染样张，
+    /// 因此预览与真实界面必然同源：同一份环境值、同一套字体构造函数。
+    @Environment(\.appTypography) private var typography
     // 默认停在「通用」：与既有行为一致，也避免切到设置 tab 时先渲染重页（播放与音质 / 存储）。
     @State private var selection: SettingsCategory = .general
     @State private var activeSheet: SettingsSheet?
@@ -98,8 +114,10 @@ struct SettingsView: View {
         List(SettingsCategory.allCases, selection: $selection) { category in
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(category.title)
-                    Text(category.subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(category.title).font(typography.uiFont(size: SettingsTextSize.body))
+                    Text(category.subtitle)
+                        .font(typography.uiFont(size: SettingsTextSize.caption))
+                        .foregroundStyle(.secondary)
                 }
             } icon: {
                 Image(systemName: category.systemImage)
@@ -116,8 +134,9 @@ struct SettingsView: View {
     private var categoryDetail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text(selection.title).font(.title2.weight(.semibold))
-                Text(selection.subtitle).foregroundStyle(.secondary)
+                Text(selection.title).font(typography.uiFont(size: SettingsTextSize.title, weight: .semibold))
+                Text(selection.subtitle)
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                 categoryContent
             }
             .padding(24)
@@ -152,7 +171,7 @@ struct SettingsView: View {
                     Text("\(Int(viewModel.defaultVolume))").monospacedDigit().foregroundStyle(.secondary).frame(width: 36)
                 }
                 Text("关闭继续播放时，队列与进度仍会恢复，但应用保持暂停。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
             }
         case .appearance:
             settingsGroup("主题") {
@@ -163,6 +182,7 @@ struct SettingsView: View {
                     ForEach(AccentColorOption.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
             }
+            TypographySettingsSection(viewModel: viewModel, typography: typography)
         case .playback:
             if let audioEffectsViewModel { settingsGroup("音效与输出") { AudioEffectsSettingsView(model: audioEffectsViewModel) } } else {
                 settingsGroup("音效与输出") { Text("音效设置尚未就绪。").foregroundStyle(.secondary) }
@@ -174,40 +194,43 @@ struct SettingsView: View {
         case .lyrics:
             settingsGroup("歌词偏好") {
                 if lyricsViewModel != nil {
-                    Text("字号、模糊非当前行、翻译与音译立即生效，未播放时也可调整；单曲偏移与网易云匹配在播放后可用。")
-                        .foregroundStyle(.secondary)
+                    Text("字号、字体与外观页共用同一份设置，两处改一处另一处会跟着变；模糊非当前行、翻译与音译立即生效，未播放时也可调整。")
+                        .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                     Button("打开歌词设置") { activeSheet = .lyrics }
                         .buttonStyle(.borderedProminent)
                 } else {
                     Text("播放引擎尚未就绪，暂时无法调整歌词偏好。")
-                        .foregroundStyle(.secondary)
+                        .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                 }
             }
         case .network:
             settingsGroup("在线服务") {
                 Text("探索页提供网易云音乐、哔哩哔哩和 YouTube Music 的搜索与浏览。")
-                    .foregroundStyle(.secondary)
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                 if let onNavigate { Button("打开搜索") { onNavigate(.explore) }.buttonStyle(.bordered) }
             }
             settingsGroup("下载") {
                 Text("下载进度、暂停 / 续传与清理在「下载」页。")
-                    .foregroundStyle(.secondary)
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                 if let onNavigate { Button("打开下载") { onNavigate(.downloads) }.buttonStyle(.bordered) }
             }
         case .storage:
             settingsGroup("媒体库目录") { libraryDirectoryContent }
         case .backup:
             if let syncViewModel { settingsGroup("备份与同步") { SyncSettingsSections(viewModel: syncViewModel) } } else {
-                Text("同步服务尚未就绪").foregroundStyle(.secondary)
+                Text("同步服务尚未就绪")
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
             }
         case .listenTogether:
             if let listenTogetherViewModel { settingsGroup("一起听") { ListenTogetherSettingsView(model: listenTogetherViewModel) } } else {
-                Text("一起听服务尚未就绪").foregroundStyle(.secondary)
+                Text("一起听服务尚未就绪")
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
             }
         case .about:
             settingsGroup("NeriPlayer") {
-                Text("版本 \(AppInfo.versionString)").font(.headline)
-                Text("原生 macOS 音乐播放器").foregroundStyle(.secondary)
+                Text("版本 \(AppInfo.versionString)").font(typography.uiFont(size: SettingsTextSize.headline, weight: .semibold))
+                Text("原生 macOS 音乐播放器")
+                    .font(typography.uiFont(size: SettingsTextSize.callout)).foregroundStyle(.secondary)
                 Button("打开诊断信息") { openWindow(id: "diagnostics") }
                     .buttonStyle(.bordered)
             }
@@ -216,7 +239,7 @@ struct SettingsView: View {
 
     private func settingsGroup<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.headline)
+            Text(title).font(typography.uiFont(size: SettingsTextSize.headline, weight: .semibold))
             content()
         }
         .padding(16)
@@ -241,7 +264,9 @@ struct SettingsView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(directory.displayName)
-                            Text(directory.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Text(directory.path)
+                                .font(typography.uiFont(size: SettingsTextSize.caption))
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                         }
                         Spacer()
                         Button { viewModel.removeDirectory(id: directory.id) } label: { Image(systemName: "minus.circle") }
@@ -269,7 +294,7 @@ struct SettingsView: View {
         if let message = viewModel.statusMessage {
             HStack(spacing: 8) {
                 Image(systemName: "info.circle")
-                Text(message).font(.callout)
+                Text(message).font(typography.uiFont(size: SettingsTextSize.callout))
                 Spacer()
                 Button("知道了") { viewModel.clearStatusMessage() }.buttonStyle(.borderless)
             }
@@ -284,6 +309,93 @@ private enum SettingsSheet: String, Identifiable {
     var id: String { rawValue }
 }
 
+// MARK: - 字体设置（需求 5）
+
+/// 外观页的字体分组：UI 字体 / UI 基础字号 / 播放器字号 / 歌词字体 / 歌词字号 / 底部歌词字号，
+/// 加一段实时预览与「恢复默认」。
+///
+/// 为什么单独成一个子视图：它需要 `@Environment(\.appTypography)` 来画预览样张，
+/// 而 AppTypography 只在根视图注入一次，这里只是消费者；把六个控件与预览收在一处，
+/// 外观分类的其余内容（主题、强调色）就不必跟着这套状态重算。
+private struct TypographySettingsSection: View {
+    @ObservedObject var viewModel: SettingsViewModel
+    /// 根视图注入的当前字体设置，直接用于样张，保证「预览」与真实界面同源。
+    let typography: AppTypography
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("字体与字号").font(typography.uiFont(size: SettingsTextSize.headline, weight: .semibold))
+                Spacer()
+                Button("恢复默认") { viewModel.restoreTypographyDefaults() }
+                    .buttonStyle(.borderless)
+                    .help("把 UI 字体、字号与歌词字体恢复为系统默认值")
+            }
+            fontFamilyPicker("UI 字体", selection: viewModel.uiFontFamily, set: viewModel.setUIFontFamily)
+            fontSizeSlider("UI 基础字号", value: viewModel.uiBaseFontSize,
+                           range: AppTypographyDefaults.uiBaseSizeRange, set: viewModel.setUIBaseFontSize)
+            Text("UI 基础字号影响侧栏、列表与按钮等常用界面文字。")
+                .font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
+            fontSizeSlider("播放器字号", value: viewModel.playerFontSize,
+                           range: AppTypographyDefaults.playerTextSizeRange, set: viewModel.setPlayerFontSize)
+            fontFamilyPicker("歌词字体", selection: viewModel.lyricsFontFamily, set: viewModel.setLyricsFontFamily)
+            fontSizeSlider("歌词字号", value: viewModel.lyricsFontSize,
+                           range: AppTypographyDefaults.lyricsBaseSizeRange, set: viewModel.setLyricsFontSize)
+            fontSizeSlider("底部歌词字号", value: viewModel.compactLyricsFontSize,
+                           range: AppTypographyDefaults.compactLyricsSizeRange, set: viewModel.setCompactLyricsFontSize)
+            Text("歌词字号与歌词窗口的滑杆共用同一个设置，两边修改都会同步。")
+                .font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
+            preview
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func fontFamilyPicker(_ title: String, selection: String, set: @escaping (String) -> Void) -> some View {
+        Picker(title, selection: Binding(get: { selection }, set: set)) {
+            Text(TypographyFontFamily.systemDisplayName).tag(TypographyFontFamily.systemID)
+            ForEach(viewModel.availableFontFamilies, id: \.self) { family in
+                Text(family).tag(family)
+            }
+            // 已存的家族若不在本机列表里（卸载字体 / 备份来自别处），补一个禁用项，
+            // Picker 才不会因为找不到当前值而显示空白。
+            if selection != TypographyFontFamily.systemID, !viewModel.availableFontFamilies.contains(selection) {
+                Text("\(selection)（本机不可用）").tag(selection)
+            }
+        }
+    }
+
+    private func fontSizeSlider(_ title: String, value: Double, range: ClosedRange<Double>,
+                                set: @escaping (Double) -> Void) -> some View {
+        HStack {
+            Text(title).frame(width: 96, alignment: .leading)
+            Slider(value: Binding(get: { value }, set: { set($0.rounded()) }), in: range)
+            Text("\(Int(value)) pt").monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
+        }
+    }
+
+    /// 实时预览：样张用与真实界面相同的 AppTypography 与同一套字体构造函数，
+    /// 因此拖动滑杆时预览与主界面同时变化，不存在「预览和实际不一致」。
+    private var preview: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("实时预览").font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
+            Text("媒体库 · 搜索 · 设置").font(typography.uiFont(size: AppTypography.baseFontSize))
+            Text("当前播放：示例歌曲 — 示例歌手").font(typography.playerFont(scaledFromBase: 15))
+            HStack {
+                Text("底部歌词").font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
+                Text("示例歌词行 · 逐字高亮效果")
+                    .font(typography.lyricFont(size: typography.compactLyricsSize, weight: .semibold))
+            }
+            Text("歌词预览行，随歌词字号与字体变化。")
+                .font(typography.lyricFont(scaledFromBase: 20))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
 /// 账号分类内容。独立成子视图的原因：
 ///   - SettingsView.onlineViewModel 是普通 var，读取它不会建立订阅，账号异步加载完成后
 ///     父视图不会重绘；这里用 ObservedObject 订阅，账号 / 登录态变化才能反映到界面。
@@ -291,6 +403,8 @@ private enum SettingsSheet: String, Identifiable {
 private struct AccountSettingsSection: View {
     @ObservedObject var model: OnlineViewModel
     var onManage: () -> Void
+    /// 账号段是独立子视图，需要自己取字体环境（设置页其余部分的注入不会自动带进来）。
+    @Environment(\.appTypography) private var typography
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -306,7 +420,7 @@ private struct AccountSettingsSection: View {
             }
             .pickerStyle(.segmented)
             if let message = model.browseErrors["账号"] {
-                Text(message).font(.caption).foregroundStyle(.secondary)
+                Text(message).font(typography.uiFont(size: SettingsTextSize.caption)).foregroundStyle(.secondary)
             }
         }
         // 平台切换时重新读取新平台的账号：source 变化会让这条 task 重跑。

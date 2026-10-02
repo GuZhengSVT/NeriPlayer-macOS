@@ -5,7 +5,8 @@
 //   - 歌曲：封面缩略图 + 标题 + 歌手 + 时长 + 格式角标，双击即播；
 //   - 歌手：按归一化歌手聚合，点进详情看该歌手全部曲目；
 //   - 专辑：按 (歌手, 专辑) 聚合，点进详情看整张专辑。
-// 所有列表共用同一套行视图与右键菜单（播放 / 下一首播放 / 加入歌单），避免三处各写一份。
+// 所有列表共用同一套行视图与右键菜单（播放 / 下一首播放 / 收藏 / 加入歌单），避免三处各写一份。
+// 行视图与本地封面缩略图已拆到同目录的 LibraryTrackRow.swift，与歌单详情共用（2026-10-03 需求 9）。
 //
 // 搜索（M2-T6）：搜索栏放在列表区顶部（歌曲段就在其后），查询态由 LibraryViewModel 持有，
 // 三个维度共用同一批命中曲目 —— 切到歌手/专辑维度看到的是过滤后的聚合，不是全库聚合。
@@ -399,7 +400,11 @@ struct LibraryTrackList: View {
                     track: track,
                     showsAlbum: showsAlbum,
                     isFavorited: viewModel.isFavorited(track),
-                    onToggleFavorite: { viewModel.toggleFavorite(track) }
+                    onToggleFavorite: { viewModel.toggleFavorite(track) },
+                    // 需求 9：收藏与「加入歌单」在行内直接可见，不必先右键。
+                    playlists: viewModel.playlists,
+                    onAddToPlaylist: { viewModel.add(track, to: $0) },
+                    onNewPlaylist: { onNewPlaylist(track) }
                 )
                     .tag(Optional(track.id))
                     .contentShape(Rectangle())
@@ -438,120 +443,6 @@ struct LibraryTrackList: View {
 
     private func enqueueNext(_ track: LibraryTrack) {
         appState.playbackStore?.enqueueNext(track.track)
-    }
-}
-
-// MARK: - 曲目行
-
-/// 单行曲目：封面缩略图 + 标题 + 歌手/专辑 + 格式角标 + 时长。
-struct LibraryTrackRow: View {
-
-    let track: LibraryTrack
-    var showsAlbum: Bool = true
-    /// 是否已收藏；由调用方从视图模型的收藏集合读出（行本身不查库）。
-    var isFavorited: Bool = false
-    /// 点星标的回调；nil 表示这一处不需要收藏交互（例如歌单详情里的行由上层另给）。
-    var onToggleFavorite: (() -> Void)?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            CoverThumbnail(path: track.coverPath, size: 36)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(track.title)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 12)
-            favoriteStar
-            if let format = track.format, !format.isEmpty {
-                Text(format.uppercased())
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
-            }
-            Text(LibraryTrackRow.durationText(track.duration))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 44, alignment: .trailing)
-        }
-        .padding(.vertical, 2)
-    }
-
-    /// 收藏星标。已收藏为实心黄星，未收藏为空心灰星（悬停提示说明动作）。
-    /// 没有回调时不渲染（保持纯展示行）。
-    @ViewBuilder
-    private var favoriteStar: some View {
-        if let onToggleFavorite {
-            Button(action: onToggleFavorite) {
-                Image(systemName: isFavorited ? "star.fill" : "star")
-                    .font(.system(size: 12))
-                    .foregroundStyle(isFavorited ? Color.yellow : Color.secondary.opacity(0.5))
-            }
-            .buttonStyle(.plain)
-            .help(isFavorited ? "取消收藏" : "添加到收藏")
-        }
-    }
-
-    private var subtitle: String {
-        let artist = track.artist.flatMap { value -> String? in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        } ?? LibraryGrouping.unknownArtist
-        guard showsAlbum else { return artist }
-        let album = track.album.flatMap { value -> String? in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-        guard let album else { return artist }
-        return artist + " · " + album
-    }
-
-    /// 时长文本；未知或非有限值时显示 --:--（不显示 0:00，避免与真实零秒混淆）。
-    static func durationText(_ duration: Double?) -> String {
-        guard let duration, duration.isFinite, duration > 0 else { return "--:--" }
-        let total = Int(duration.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-}
-
-// MARK: - 封面
-
-/// 封面缩略图：有落盘文件则读图，否则显示音符占位。
-struct CoverThumbnail: View {
-
-    let path: String?
-    let size: CGFloat
-    var cornerRadius: CGFloat = 4
-
-    var body: some View {
-        Group {
-            if let image = Self.loadImage(path) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ZStack {
-                    Rectangle().fill(Color.secondary.opacity(0.12))
-                    Image(systemName: "music.note")
-                        .font(.system(size: size * 0.4))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .accessibilityHidden(true)
-    }
-
-    /// 读封面文件。路径为空或文件不可解码时返回 nil，由调用方回落占位图。
-    private static func loadImage(_ path: String?) -> NSImage? {
-        guard let path, !path.isEmpty else { return nil }
-        return NSImage(contentsOfFile: path)
     }
 }
 

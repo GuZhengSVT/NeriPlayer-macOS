@@ -1,14 +1,28 @@
 // FloatingPlayerBar.swift
 // NeriPlayer macOS —— 跨 tab 常驻的底部播放器栏。
 //
-// 关键取舍（对应用户要求）：
-//   1) 进度条固定在最上方，且**始终渲染**：引擎尚未加载出时长时显示不确定进度（加载态），
-//      而不是把控件撤掉 —— 换歌/首帧不会让整条栏跳一下（防闪）。进度条可拖动跳转。
-//   2) 曲目区可显示 1–2 行：标题 + 歌手（宽度够时带真实音频规格），再加一行当前歌词。
-//   3) 真实音频规格（编码/比特率/采样率/声道）来自内核实际打开的文件；没有就不显示，绝不编造。
-//   4) 控件先按组排序（传输 / 模式 / 收藏 / 展示 / 队列 / 音量），再按窗口宽度把放不下的收进「更多」菜单。
-//   5) 队列按钮由本栏自己弹出真正的当前队列（PlaybackQueuePopover），因此不再需要 onOpenQueue。
-//   6) 「悬浮歌词」调用 appState.toggleFloatingLyrics()；「歌词」走主窗口的 onLyrics 回调。
+// 本轮（2026-10-03）排版规格：**三区布局，左右等宽**。
+//   1) 左区（左对齐）：封面贴窗口左边界（水平内边距 14），右侧紧接曲名 / 歌手 / 歌曲数据（并排）
+//      / 当前歌词；曲名约 17pt，歌手与数据约 13pt。音乐来源不再单独一行，而是并入歌曲数据行
+//      （形如「某歌手 网易云 · AAC · 128 kbps · 48 kHz · 2ch」）。本地曲没有平台来源，只显示规格。
+//   2) 中区（居中）：上面一行「已播时间 + 进度条 + 总时长」，下面传输组（上一首 / 播放暂停 / 下一首），
+//      播放按钮明显放大。宽度固定（PlayerBarLayout.centerWidth），保证居中不随左右内容漂移。
+//   3) 右区（右对齐）：模式、播完暂停、收藏、加入歌单、桌面歌词、队列、音量、更多。
+//      全部走同一字号与同一间距（14），不分组建。
+//
+// 为什么左右等宽：中区要落在**整窗水平中心**。若写成「左信息 + Spacer + 中区 + Spacer + 右动作」，
+// 两个 Spacer 均分的是「左信息之后、右动作之前」的剩余空间 —— 两侧内容宽度不等时中区就会偏斜。
+// 把左右两区固定成同一个宽度，中区中心天然等于整窗中心。
+//
+// 关键取舍：
+//   1) 进度条固定在栏内（在控制按钮上方），且**始终渲染**：引擎尚未加载出时长时显示不确定进度，
+//      而不是把控件撤掉 —— 换歌/首帧不会让整条栏跳一下。播放中的 seek 也不会触发整栏加载占位。
+//   2) 真实音频规格（编码/比特率/采样率/声道）来自内核实际打开的文件；没有就不编造，显示待加载。
+//   3) 控件按窗口宽度收起次要动作、保留传输组与队列入口；收起项仍能在「更多」菜单里找到。
+//   4) 队列按钮由本栏自己弹出真正的当前队列（PlaybackQueuePopover），因此不再需要 onOpenQueue。
+//   5) 旧「打开歌词页」按钮与主窗口 sheet 导航入口已删除；点封面或歌曲信息打开「歌曲播放页」，
+//      桌面悬浮歌词入口保留。
+//   6) 栏内所有可点击按钮都带 `.help`（macOS 原生悬停提示），文案反映当前状态。
 //
 // 订阅模型（T01 起沿用）：本栏不直接读 appState.playbackStore 的实时属性，而是用一个 @State 捕获
 // store 与最近一次快照。store 晚于本视图出现（启动顺序）也能接上：onReceive(appState.$playbackStore)
@@ -19,8 +33,10 @@ import SwiftUI
 struct FloatingPlayerBar: View {
 
     @EnvironmentObject private var appState: AppState
-    /// 打开主窗口歌词面板（保留给主窗口，主智能体接入）。
-    var onLyrics: () -> Void
+    /// 统一字体接口（B 提供）。视图只读它，不自己拼 Font.system。
+    @Environment(\.appTypography) private var typography
+    /// 打开主窗口的「歌曲播放页」。默认空实现，方便测试与预览单独渲染本栏。
+    var onOpenNowPlaying: () -> Void = {}
 
     /// 捕获的 store 与快照，跨导航与晚启动存活。
     @State private var playbackStore: PlaybackStateStore?
@@ -35,7 +51,7 @@ struct FloatingPlayerBar: View {
     ///
     /// 通过 .background 里的 GeometryReader 测量并回填，而不是把整条栏包进 GeometryReader：
     /// 后者会强制栏有一个固定高度（GeometryReader 的子视图拿不到父级理想高度），
-    /// 于是曲目区从一行变两行时会被裁掉。这里只测宽度，高度仍由内容自然决定。
+    /// 于是内容会被裁掉。这里只测宽度，高度仍由内容自然决定。
     @State private var availableWidth: CGFloat = PlayerBarLayout.wideThreshold
 
     var body: some View {
@@ -68,139 +84,108 @@ struct FloatingPlayerBar: View {
 
     // MARK: - 主体
 
-    @ViewBuilder
     private func content(width: CGFloat) -> some View {
         let plan = PlayerBarLayout.plan(forWidth: width)
-        VStack(spacing: 0) {
+        // 无曲/换歌期间也走同一条 row：文字落到占位文案、控件置灰，骨架与栏高完全不变。
+        return VStack(spacing: 0) {
             Divider()
-            // 进度行固定在最上方，始终在（无曲时空轨道；有曲但时长未出时不确定进度）。
-            progressRow
-            if let store = playbackStore, let current = snapshot {
-                mainRow(store: store, snapshot: current, plan: plan)
-            } else {
-                placeholderRow
-            }
+            mainRow(store: playbackStore, snapshot: snapshot, plan: plan, width: width)
         }
         .background(.regularMaterial)
         .contentShape(Rectangle())
     }
 
-    /// 进度行：左侧已播时间 + 进度条 + 右侧总时长。时间用等宽数字，宽度固定避免跳动。
-    private var progressRow: some View {
-        HStack(spacing: 8) {
-            Text(PlaybackTimeText.text(snapshot?.position ?? 0))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .leading)
-            PlayerProgressBar(
-                position: snapshot?.position ?? 0,
-                duration: snapshot?.duration ?? 0,
-                hasTrack: snapshot?.currentTrack != nil,
-                onSeek: { seconds in playbackStore?.seek(to: seconds) }
-            )
-            Text(PlaybackTimeText.durationText(snapshot?.duration ?? 0))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .trailing)
+    // MARK: - 主行（左信息 / 中控制 / 右动作）
+
+    /// 三区布局：左右两侧都是同一个固定宽度，中间控制区因此落在**整窗水平中心**。
+    private func mainRow(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
+                         plan: PlayerBarLayoutPlan, width: CGFloat) -> some View {
+        // 左右等宽：中区中心 == 整窗中心。扣掉两侧的水平内边距，三区总宽才正好等于栏宽
+        // （否则左右区会把整条栏撑得比窗口更宽）。下限 120 只用于防御极窄窗口，
+        // 主窗口最小宽度 720 时左区仍有 186pt 放得下封面与曲名。
+        let sideWidth = max(120, (width - PlayerBarLayout.centerWidth - Self.horizontalPadding * 2) / 2)
+        return HStack(spacing: 0) {
+            informationRegion(store: store, snapshot: snapshot, plan: plan)
+                .frame(width: sideWidth, alignment: .leading)
+            centerRegion(store: store, snapshot: snapshot)
+                .frame(width: PlayerBarLayout.centerWidth)
+            actionsRegion(store: store, snapshot: snapshot, plan: plan)
+                .frame(width: sideWidth, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-        .frame(height: 18)
+        // 栏高约等于封面高度（72）。用 minHeight 而不是固定 height：默认字号下正好 72，
+        // 用户把播放器/歌词字号调到上限时文字不被裁掉，栏随之略长。
+        .frame(minHeight: PlayerArtwork.barRowHeight)
+        .padding(.horizontal, Self.horizontalPadding)
+        .padding(.vertical, 4)
     }
 
-    /// 主行固定高度：所有宽度、所有曲目下都稳定，换歌/窄窗不会让整条栏上下跳。
-    static let rowHeight: CGFloat = 56
+    /// 栏的水平内边距。封面因此贴住窗口左边界（14pt），与需求一致；同一常量参与左右等宽的计算。
+    static let horizontalPadding: CGFloat = 14
 
-    /// store 未就绪时的稳定占位：栏高度不跳。
-    private var placeholderRow: some View {
-        HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.12))
-                .frame(width: 44, height: 44)
-                .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
-            Text("播放器未就绪").font(.callout).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-        }
-        .frame(height: Self.rowHeight)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-    }
+    // MARK: - 左区：封面 + 曲名 / 歌手与数据 / 歌词
 
-    // MARK: - 主行（分组）
-
-    private func mainRow(store: PlaybackStateStore, snapshot: PlaybackSnapshot, plan: PlayerBarLayoutPlan) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            PlayerBarArtwork(track: snapshot.currentTrack)
-                .frame(width: 44, height: 44)
-
+    private func informationRegion(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
+                                   plan: PlayerBarLayoutPlan) -> some View {
+        let track = snapshot?.currentTrack
+        let size = PlayerArtwork.barSize(for: track)
+        return HStack(spacing: 14) {
+            // 封面在最左，由外层的 14pt 水平内边距贴住窗口左边界。
+            artworkButton(track: track)
+                .frame(width: size.width, height: size.height)
             trackInfo(snapshot: snapshot, plan: plan)
-
-            // 中间 flexible 区域：宽窗时用当前歌词填满左侧信息区与右侧按钮之间的空白；
-            // 无歌词或窄窗时用等宽空白占位，保证高度与其余控件位置都不变（歌词缺失也保留空间）。
-            lyricRegion(plan: plan)
-
-            // 组 1：传输（恒内联）
-            transportGroup(store: store, snapshot: snapshot)
-
-            // 组 2–4：模式 / 收藏 / 展示（按档位内联或收进更多）
-            inlineOptionalControls(plan: plan, snapshot: snapshot)
-
-            // 组 5：队列（恒内联，自己弹真实队列）
-            queueButton
-
-            // 组 6：音量（宽窗内联，窄窗收进更多）
-            if plan.isInline(.volume) {
-                volumeControl(store: store, snapshot: snapshot)
-            }
-
-            // 更多菜单始终在：它同时承载「播放完当前曲后暂停」这类低频动作，
-            // 若只在有控件被收起时才出现，宽窗下这个功能就没有入口。
-            moreMenu(store: store, snapshot: snapshot, plan: plan)
         }
-        .frame(height: Self.rowHeight)
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
     }
 
-    // MARK: - 曲目信息（标题 / 歌手 / 规格）
-
-    private func trackInfo(snapshot: PlaybackSnapshot, plan: PlayerBarLayoutPlan) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(snapshot.currentTrack?.title ?? "未播放")
-                .font(.callout.weight(.semibold))
-                .lineLimit(1)
-            // 第二行恒在（标题 + 歌手），保证主行高度在任意宽度都一致；
-            // 宽窗时在歌手后追加真实音频规格，窄窗只显示歌手。
-            Text(artistText(snapshot.currentTrack))
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            if plan.showsArtistLine {
-                Text(AudioInfoText.summary(snapshot.audioTrackInfo) ?? "音频信息待加载")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    .help(AudioInfoText.summary(snapshot.audioTrackInfo) ?? "音频信息待加载")
-            }
+    /// 封面即「打开歌曲播放页」的入口。
+    private func artworkButton(track: Track?) -> some View {
+        Button { onOpenNowPlaying() } label: {
+            PlayerArtwork(content: PlayerArtwork.content(for: track, library: appState.libraryViewModel),
+                          shape: PlayerArtwork.shape(for: track),
+                          cornerRadius: 8, symbolSize: 22)
         }
-        // 固定信息区宽度：把宽窗剩余的横向空白让给中间的歌词区（而不是让信息区无限拉长）。
-        .frame(width: Self.infoWidth, alignment: .leading)
+        .buttonStyle(.plain)
+        .help("打开歌曲播放页")
+        .accessibilityLabel("打开歌曲播放页")
     }
 
-    /// 信息区固定宽度。
-    static let infoWidth: CGFloat = 200
-
-    /// 中间的歌词区：宽窗展示当前歌词行，占满剩余空白；否则用等宽空白占位。
-    ///
-    /// 歌词内容放在独立的 @ObservedObject 子视图里（PlayerBarLyricLine）：LyricsViewModel 是
-    /// ObservableObject，若在本视图里只读它的属性、不订阅它，歌词语义变化（异步加载完成、
-    /// 暂停期间偏移重算）不会触发重绘。播放在进行时 store 进度会顺带刷新本视图，但暂停/加载完成
-    /// 这类没有进度事件时刻就不会回流 —— 独立观察子视图可以覆盖这两种情况。
-    @ViewBuilder
-    private func lyricRegion(plan: PlayerBarLayoutPlan) -> some View {
-        if plan.showsLyricLine, let model = appState.lyricsViewModel {
-            PlayerBarLyricLine(model: model, trackID: snapshot?.currentTrack?.id)
-        } else {
-            // 保留同样的 flexible 空白：歌词缺失或窄窗时高度与控件位置不变。
-            Color.clear.frame(maxWidth: .infinity)
+    private func trackInfo(snapshot: PlaybackSnapshot?, plan: PlayerBarLayoutPlan) -> some View {
+        let track = snapshot?.currentTrack
+        return VStack(alignment: .leading, spacing: 2) {
+            // 标题与歌手/数据都包在按钮里：点歌曲信息同样进入播放页。
+            Button { onOpenNowPlaying() } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track?.title ?? "未播放")
+                        // 播放器字号设置在此生效（17pt 是设计基准，缩放在接口内完成）。
+                        .font(typography.playerFont(scaledFromBase: 17))
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    if plan.showsArtistLine {
+                        // 歌手 + 来源 + 音频规格合并成一行：来源不再单独占一行。
+                        HStack(spacing: 6) {
+                            Text(artistText(track))
+                                .font(typography.uiFont(size: 13))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Text(sourceAndSpecText(snapshot))
+                                .font(typography.uiFont(size: 13))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .help(sourceAndSpecText(snapshot))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("打开歌曲播放页")
+            // 当前歌词行：用「底部歌词字号」设置，独立观察 LyricsViewModel，
+            // 覆盖暂停、歌词异步加载完成这两类没有进度事件的时刻。
+            if plan.showsLyricLine, let model = appState.lyricsViewModel {
+                PlayerBarLyricLine(model: model, trackID: track?.id)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func artistText(_ track: Track?) -> String {
@@ -210,48 +195,104 @@ struct FloatingPlayerBar: View {
         return artist
     }
 
-    // MARK: - 传输组
+    /// 歌曲数据行（不含歌手）：平台来源 + 真实音频规格，用 " · " 连接。
+    ///
+    /// 来源只在在线曲出现（本地曲没有平台）；规格只列内核实际报告过的字段，缺一项就不显示那一项，
+    /// 全缺时给一个明确占位而不是空白。
+    private func sourceAndSpecText(_ snapshot: PlaybackSnapshot?) -> String {
+        let source = snapshot?.currentTrack?.onlineSong?.source.title
+        let spec = AudioInfoText.summary(snapshot?.audioTrackInfo)
+        let parts = [source, spec].compactMap { $0 }
+        return parts.isEmpty ? "音频信息待加载" : parts.joined(separator: " · ")
+    }
 
-    private func transportGroup(store: PlaybackStateStore, snapshot: PlaybackSnapshot) -> some View {
-        let hasTrack = snapshot.currentTrack != nil
-        return HStack(spacing: 4) {
-            Button { store.previous() } label: { Image(systemName: "backward.end.fill") }
-                .help("上一首")
-                .disabled(!hasTrack)
-            Button { store.togglePlayPause() } label: {
-                Image(systemName: isPlaying(snapshot) ? "pause.fill" : "play.fill")
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.borderedProminent)
-            .help("播放或暂停")
-            .disabled(!hasTrack)
-            Button { store.next(force: true) } label: { Image(systemName: "forward.end.fill") }
-                .help("下一首")
-                .disabled(!hasTrack)
+    // MARK: - 中区：进度行 + 传输组
+
+    /// 中区固定宽度，上下两行：进度行在上，传输组在下；播放按钮明显放大。
+    private func centerRegion(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        VStack(spacing: 4) {
+            progressRow(store: store, snapshot: snapshot)
+            transportGroup(store: store, snapshot: snapshot)
         }
+    }
+
+    /// 进度行：已播时间 + 进度条 + 总时长。时间用等宽数字、宽度固定，避免数字变化时抖动。
+    private func progressRow(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        let position = snapshot?.position ?? 0
+        let duration = snapshot?.duration ?? 0
+        return HStack(spacing: 8) {
+            Text(PlaybackTimeText.text(position))
+                .font(typography.uiFont(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            PlayerProgressBar(
+                position: position,
+                duration: duration,
+                hasTrack: snapshot?.currentTrack != nil,
+                trackID: snapshot?.currentTrack?.id,
+                onSeek: { seconds in store?.seek(to: seconds) }
+            )
+            Text(PlaybackTimeText.durationText(duration))
+                .font(typography.uiFont(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
+        }
+    }
+
+    private func transportGroup(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        let hasTrack = snapshot?.currentTrack != nil
+        let playing = snapshot.map(isPlaying) ?? false
+        return HStack(spacing: 10) {
+            Button { store?.previous() } label: {
+                Image(systemName: "backward.end.fill").font(typography.playerFont(scaledFromBase: 20))
+            }
+            .help("上一首")
+            .disabled(!hasTrack)
+            Button { store?.togglePlayPause() } label: {
+                // 播放按钮明显放大：48pt 圆形实心按钮，是整条栏的视觉焦点。
+                Image(systemName: playing ? "pause.fill" : "play.fill")
+                    .font(typography.playerFont(scaledFromBase: 22))
+                    .frame(width: 48, height: 48)
+                    .background(Color.accentColor, in: Circle())
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .help(playing ? "暂停" : "播放")
+            .disabled(!hasTrack)
+            Button { store?.next(force: true) } label: {
+                Image(systemName: "forward.end.fill").font(typography.playerFont(scaledFromBase: 20))
+            }
+            .help("下一首")
+            .disabled(!hasTrack)
+        }
+        .buttonStyle(.borderless)
     }
 
     private func isPlaying(_ snapshot: PlaybackSnapshot) -> Bool {
         !snapshot.isPaused && !snapshot.isCoreIdle
     }
 
-    // MARK: - 可选控件（按档位内联）
+    // MARK: - 右区：模式 / 播完暂停 / 收藏 / 歌单 / 桌面歌词 / 队列 / 音量 / 更多
 
-    private func inlineOptionalControls(plan: PlayerBarLayoutPlan, snapshot: PlaybackSnapshot) -> some View {
-        HStack(spacing: 4) {
-            if plan.isInline(.mode) { modeButton(snapshot: snapshot) }
-            if plan.isInline(.pauseAfterCurrent) { pauseAfterCurrentButton(snapshot: snapshot) }
+    /// 右对齐、大小相等、间隔相等，不分组建：整组共用同一字号与同一间距（14）。
+    private func actionsRegion(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
+                               plan: PlayerBarLayoutPlan) -> some View {
+        HStack(spacing: 14) {
+            if plan.isInline(.mode) { modeButton(store: store, snapshot: snapshot) }
+            if plan.isInline(.pauseAfterCurrent) { pauseAfterCurrentButton(store: store, snapshot: snapshot) }
             if plan.isInline(.favorite), let library = appState.libraryViewModel {
                 libraryActions(library, placement: .inlineFavorite, snapshot: snapshot)
             }
             if plan.isInline(.addToPlaylist), let library = appState.libraryViewModel {
                 libraryActions(library, placement: .inlinePlaylist, snapshot: snapshot)
             }
-            if plan.isInline(.lyrics) {
-                Button(action: onLyrics) { Image(systemName: "text.alignleft") }.help("打开歌词")
-            }
             if plan.isInline(.floatingLyrics) { floatingLyricsButton }
+            // 队列恒内联：它是打开真实队列列表的唯一入口。
+            queueButton
+            if plan.isInline(.volume) { volumeControl(store: store, snapshot: snapshot) }
+            // 更多菜单始终在：它同时承载「播完当前曲暂停」这类低频动作与音频信息，
+            // 若只在有控件被收起时才出现，宽窗下这些功能就没有入口。
+            moreMenu(store: store, snapshot: snapshot, plan: plan)
         }
+        .font(typography.playerFont(scaledFromBase: 17))
     }
 
     /// 把「收藏 / 加入歌单」的渲染交给持有 @ObservedObject LibraryViewModel 的子视图。
@@ -260,10 +301,10 @@ struct FloatingPlayerBar: View {
     /// 而本栏只订阅 AppState。暂停或没有进度事件时，点收藏或新建歌单后 LibraryViewModel 的变化
     /// 不会冒泡到本栏，按钮/菜单不会刷新（与歌词行同一个坑）。子视图观察 LibraryViewModel 自身即可覆盖。
     private func libraryActions(_ library: LibraryViewModel, placement: PlayerBarLibraryActions.Placement,
-                                snapshot: PlaybackSnapshot) -> some View {
+                                snapshot: PlaybackSnapshot?) -> some View {
         PlayerBarLibraryActions(
             library: library,
-            track: snapshot.currentTrack,
+            track: snapshot?.currentTrack,
             placement: placement,
             onToggleFavorite: { toggleFavorite(snapshot) },
             onAddToPlaylist: { addToPlaylist($0, snapshot: snapshot) },
@@ -274,15 +315,15 @@ struct FloatingPlayerBar: View {
     // MARK: - 播完当前曲暂停
 
     /// 开关式按钮：开启后本曲自然播完停在当前曲（一次性）。图标在开启时高亮以表达状态。
-    private func pauseAfterCurrentButton(snapshot: PlaybackSnapshot) -> some View {
-        let enabled = snapshot.pauseAfterCurrent
+    private func pauseAfterCurrentButton(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        let enabled = snapshot?.pauseAfterCurrent ?? false
         return Button {
-            playbackStore?.setPauseAfterCurrent(!enabled)
+            store?.setPauseAfterCurrent(!enabled)
         } label: {
             Image(systemName: enabled ? "pause.circle.fill" : "pause.circle")
                 .foregroundStyle(enabled ? Color.accentColor : Color.primary)
         }
-        .disabled(snapshot.currentTrack == nil)
+        .disabled(snapshot?.currentTrack == nil)
         .help(enabled ? "已开启：播完当前曲暂停（点击取消）" : "播完当前曲后暂停")
         .accessibilityLabel("播完当前曲暂停")
         .accessibilityValue(enabled ? "已开启" : "已关闭")
@@ -291,15 +332,16 @@ struct FloatingPlayerBar: View {
     // MARK: - 模式
 
     /// 一个按钮循环切换四种播放模式，图标随当前模式变化。
-    private func modeButton(snapshot: PlaybackSnapshot) -> some View {
-        Button {
-            playbackStore?.setMode(nextMode(after: snapshot.queue.mode))
+    private func modeButton(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        let mode = snapshot?.queue.mode ?? .sequential
+        return Button {
+            store?.setMode(nextMode(after: mode))
         } label: {
-            Image(systemName: Self.modeSymbol(snapshot.queue.mode))
+            Image(systemName: Self.modeSymbol(mode))
         }
-        .help("播放模式：\(Self.modeTitle(snapshot.queue.mode))（点击切换）")
+        .help("\(Self.modeTitle(mode))（点击切换播放模式）")
         .accessibilityLabel("播放模式")
-        .accessibilityValue(Self.modeTitle(snapshot.queue.mode))
+        .accessibilityValue(Self.modeTitle(mode))
     }
 
     private func nextMode(after mode: PlaybackMode) -> PlaybackMode {
@@ -329,7 +371,7 @@ struct FloatingPlayerBar: View {
         }
     }
 
-    // MARK: - 悬浮歌词
+    // MARK: - 桌面悬浮歌词
 
     private var floatingLyricsButton: some View {
         Button { appState.toggleFloatingLyrics() } label: {
@@ -360,9 +402,9 @@ struct FloatingPlayerBar: View {
 
     // MARK: - 音量
 
-    private func volumeControl(store: PlaybackStateStore, snapshot: PlaybackSnapshot) -> some View {
-        VolumeSlider(value: snapshot.volume) { committed in
-            store.setVolume(committed)
+    private func volumeControl(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?) -> some View {
+        VolumeSlider(value: snapshot?.volume ?? 0) { committed in
+            store?.setVolume(committed)
         }
     }
 
@@ -375,7 +417,8 @@ struct FloatingPlayerBar: View {
 
     // MARK: - 更多菜单（收起的控件）
 
-    private func moreMenu(store: PlaybackStateStore, snapshot: PlaybackSnapshot, plan: PlayerBarLayoutPlan) -> some View {
+    private func moreMenu(store: PlaybackStateStore?, snapshot: PlaybackSnapshot?,
+                          plan: PlayerBarLayoutPlan) -> some View {
         Menu {
             // 音频信息恒在：窄窗把规格从主行收起后，这里仍能读到真实编码/比特率等；
             // 无数据时不编造，显示「音频信息不可用」。
@@ -387,33 +430,26 @@ struct FloatingPlayerBar: View {
                     // 因此这里用 rawValue 做稳定标识，而不是 id: \.self。
                     ForEach(PlaybackMode.allCases, id: \.rawValue) { mode in
                         Button {
-                            store.setMode(mode)
+                            store?.setMode(mode)
                         } label: {
                             Label(Self.modeTitle(mode),
-                                  systemImage: snapshot.queue.mode == mode ? "checkmark" : Self.modeSymbol(mode))
+                                  systemImage: snapshot?.queue.mode == mode ? "checkmark" : Self.modeSymbol(mode))
                         }
                     }
                 }
                 Divider()
             }
             if plan.collapsed.contains(.pauseAfterCurrent) {
-                Button(snapshot.pauseAfterCurrent ? "取消：播完当前曲暂停" : "播完当前曲暂停") {
-                    store.setPauseAfterCurrent(!snapshot.pauseAfterCurrent)
+                Button(snapshot?.pauseAfterCurrent == true ? "取消：播完当前曲暂停" : "播完当前曲暂停") {
+                    store?.setPauseAfterCurrent(!(snapshot?.pauseAfterCurrent ?? false))
                 }
-                .disabled(snapshot.currentTrack == nil)
+                .disabled(snapshot?.currentTrack == nil)
             }
-            if plan.collapsed.contains(.favorite) {
-                if let library = appState.libraryViewModel {
-                    libraryActions(library, placement: .menuFavorite, snapshot: snapshot)
-                }
+            if plan.collapsed.contains(.favorite), let library = appState.libraryViewModel {
+                libraryActions(library, placement: .menuFavorite, snapshot: snapshot)
             }
-            if plan.collapsed.contains(.addToPlaylist) {
-                if let library = appState.libraryViewModel {
-                    libraryActions(library, placement: .menuPlaylist, snapshot: snapshot)
-                }
-            }
-            if plan.collapsed.contains(.lyrics) {
-                Button("打开歌词") { onLyrics() }
+            if plan.collapsed.contains(.addToPlaylist), let library = appState.libraryViewModel {
+                libraryActions(library, placement: .menuPlaylist, snapshot: snapshot)
             }
             if plan.collapsed.contains(.floatingLyrics) {
                 Button("桌面悬浮歌词") { appState.toggleFloatingLyrics() }
@@ -423,7 +459,7 @@ struct FloatingPlayerBar: View {
                 Divider()
                 // 菜单项是按钮，不能承载滑杆；点这一项后由外层 Menu 的 popover 弹出真正的音量滑杆
                 // （锚在更多按钮上，菜单关闭后出现，比把 popover 挂在菜单项上稳定）。
-                Button("音量…（\(Int(snapshot.volume.rounded()))）") { isMenuVolumePresented = true }
+                Button("音量…（\(Int((snapshot?.volume ?? 0).rounded()))）") { isMenuVolumePresented = true }
             }
         } label: {
             Image(systemName: "ellipsis.circle")
@@ -432,16 +468,16 @@ struct FloatingPlayerBar: View {
         .help("更多")
         .accessibilityLabel("更多")
         .popover(isPresented: $isMenuVolumePresented, arrowEdge: .bottom) {
-            VolumeSliderPopover(value: snapshot.volume) { committed in
-                store.setVolume(committed)
+            VolumeSliderPopover(value: snapshot?.volume ?? 0) { committed in
+                store?.setVolume(committed)
             }
         }
     }
 
     /// 「更多」菜单顶部的音频信息：只列内核报告过的字段。
     @ViewBuilder
-    private func audioInfoSection(snapshot: PlaybackSnapshot) -> some View {
-        if let summary = AudioInfoText.summary(snapshot.audioTrackInfo) {
+    private func audioInfoSection(snapshot: PlaybackSnapshot?) -> some View {
+        if let summary = AudioInfoText.summary(snapshot?.audioTrackInfo) {
             Text("音频：\(summary)")
         } else {
             Text("音频信息不可用")
@@ -451,9 +487,9 @@ struct FloatingPlayerBar: View {
     // MARK: - 收藏 / 歌单动作（本地走库，在线先入库）
 
     /// 切换当前曲收藏。本地曲走库内切换；在线歌走「先入库再收藏」。
-    private func toggleFavorite(_ snapshot: PlaybackSnapshot) {
+    private func toggleFavorite(_ snapshot: PlaybackSnapshot?) {
         guard let library = appState.libraryViewModel else { return }
-        switch CurrentTrackLibraryActions.target(for: snapshot.currentTrack, libraryTracks: library.tracks) {
+        switch CurrentTrackLibraryActions.target(for: snapshot?.currentTrack, libraryTracks: library.tracks) {
         case .library(let item):
             library.toggleFavorite(item)
         case .online(let song):
@@ -464,9 +500,9 @@ struct FloatingPlayerBar: View {
     }
 
     /// 把当前曲加入某歌单。本地曲直接入单；在线歌先入库再带上歌单 id。
-    private func addToPlaylist(_ playlist: PlaylistInfo, snapshot: PlaybackSnapshot) {
+    private func addToPlaylist(_ playlist: PlaylistInfo, snapshot: PlaybackSnapshot?) {
         guard let library = appState.libraryViewModel else { return }
-        switch CurrentTrackLibraryActions.target(for: snapshot.currentTrack, libraryTracks: library.tracks) {
+        switch CurrentTrackLibraryActions.target(for: snapshot?.currentTrack, libraryTracks: library.tracks) {
         case .library(let item):
             library.add(item, to: playlist)
         case .online(let song):
@@ -494,10 +530,6 @@ struct FloatingPlayerBar: View {
         }
     }
 }
-
-// MARK: - 新建歌单命名 sheet
-
-// MARK: - 音量滑杆（提交式，无离散刻度）
 
 // MARK: - 当前曲的收藏 / 加入歌单（观察 LibraryViewModel）
 
@@ -535,6 +567,7 @@ private struct PlayerBarLibraryActions: View {
         case .inlineFavorite:
             favoriteButton
         case .menuFavorite:
+            // 菜单项写「取消收藏」而不是「已收藏」，让文案直接说明点击后的动作。
             Button(isFavorited ? "取消收藏" : "添加到收藏") { onToggleFavorite() }
                 .disabled(!isActionable)
         case .inlinePlaylist:
@@ -577,6 +610,8 @@ private struct PlayerBarLibraryActions: View {
     }
 }
 
+// MARK: - 音量滑杆（提交式，无离散刻度）
+
 /// 应用音量滑杆：拖动时本地跟手，松开（提交）时一次性写回 store。
 ///
 /// 两个要点：
@@ -584,6 +619,9 @@ private struct PlayerBarLibraryActions: View {
 ///      这里用连续区间，拖动是本视图内部状态，只在松开时提交一次，避免拖动过程中反复触发内核 I/O。
 ///   2) 松手提交而非实时提交：setVolume 每次都下发引擎并发布快照，实时提交会让拖动产生大量发布。
 ///      暂停期间切歌等场景不需要实时音量，提交式已足够且更稳。
+///
+/// 宽度是算过的：右区在最宽档下要同时放下 8 个按钮，音量控件（图标 22 + 数字 24 + 滑杆 84 + 间距 12
+/// = 142）加上其余 7 个按钮与间距刚好不超过左右等宽区，否则右侧内容会把窗口撑宽。
 private struct VolumeSlider: View {
     /// 外部传入的当前音量（用于初始化与外部变化同步）。
     let value: Double
@@ -603,7 +641,6 @@ private struct VolumeSlider: View {
         HStack(spacing: 6) {
             Image(systemName: FloatingPlayerBar.volumeSymbol(draft))
                 .foregroundStyle(.secondary)
-                .font(.caption)
             Text("\(Int(draft.rounded()))")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -617,8 +654,9 @@ private struct VolumeSlider: View {
                     if !editing { onCommit(draft) }
                 }
             )
-            .frame(width: 96)
+            .frame(width: 84)
             .controlSize(.small)
+            .help("应用音量（\(Int(draft.rounded()))）")
             .accessibilityLabel("音量")
             .accessibilityValue("\(Int(draft.rounded()))")
         }
@@ -645,18 +683,22 @@ private struct VolumeSliderPopover: View {
 
 // MARK: - 当前歌词行（独立观察，覆盖暂停/加载完成时无进度事件的情况）
 
-/// 中栏歌词行。作为独立子视图持有 @ObservedObject LyricsViewModel：
+/// 曲目信息里的当前歌词行。作为独立子视图持有 @ObservedObject LyricsViewModel：
 /// 播放进行时虽然 store 进度会顺带刷新外层，但暂停、歌词异步加载完成这两类时刻没有进度事件，
 /// 外层不会重绘；这里订阅 model 自身的变化即可覆盖。
+///
+/// 字号走统一字体接口的「底部歌词字号」（compactLyricsSize），并套用用户选择的歌词字体，
+/// 因此外观页调这一项时本行即时跟随。
 private struct PlayerBarLyricLine: View {
     @ObservedObject var model: LyricsViewModel
+    @Environment(\.appTypography) private var typography
     /// 期望对应的当前曲目 id：与 model 内快照不一致（model 尚未切到新曲）时显示占位。
     let trackID: UUID?
 
     var body: some View {
         let text = lyricText
         Text(text)
-            .font(.caption)
+            .font(typography.lyricFont(size: typography.compactLyricsSize, weight: .semibold))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -708,20 +750,5 @@ private struct NewCurrentTrackPlaylistSheet: View {
         guard !trimmedName.isEmpty else { return }
         onConfirm(trimmedName)
         dismiss()
-    }
-}
-
-// MARK: - 封面
-
-private struct PlayerBarArtwork: View {
-    let track: Track?
-    var body: some View {
-        if let url = track?.onlineSong?.artworkURL {
-            OnlineArtwork(url: url)
-        } else {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.12))
-                .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
-        }
     }
 }

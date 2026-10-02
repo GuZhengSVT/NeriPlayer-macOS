@@ -104,6 +104,13 @@ final class OnlineFeatureTests: XCTestCase {
         let outcome = try await PlaybackResolver(clients: []).resolve(song)
         guard case .skipped = outcome else { return XCTFail("expected skip") }
     }
+    func testNeteaseFallbackPlatformPriorityPrecedesMatchScore() {
+        var bilibili = song; bilibili.source = .bilibili; bilibili.sourceID = "BV1xx411c7mD:1"; bilibili.duration = 184
+        var youtube = song; youtube.source = .youtubeMusic; youtube.sourceID = "abcdefghijk"
+        let candidates = PlaybackResolver(clients: []).candidates(for: song, from: [youtube, bilibili])
+        XCTAssertEqual(candidates.map(\.song.source), [.netease, .bilibili, .youtubeMusic])
+        XCTAssertGreaterThan(candidates[2].score.total, candidates[1].score.total)
+    }
     func testPlaybackHeadersRejectInjection() throws {
         XCTAssertThrowsError(try OnlinePlaybackHeaders.validated(["Cookie": "x=1\r\nX: y"]))
         XCTAssertThrowsError(try OnlinePlaybackHeaders.validated(["Bad Key": "x"]))

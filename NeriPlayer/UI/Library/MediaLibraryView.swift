@@ -35,18 +35,15 @@ struct MediaLibraryView: View {
     @Binding var selection: MediaLibraryPage
     @ObservedObject private var collectionFavorites = CollectionFavoritesStore.shared
     @State private var favoriteSection = 0
+    /// 当前悬停的导航胶囊。悬停反馈与选中底色共用同一套视觉，只是色值更淡。
+    @State private var hoveredPage: MediaLibraryPage?
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(MediaLibraryPage.allCases) { page in
-                        Button { selection = page } label: {
-                            Text(page.title).font(.callout.weight(selection == page ? .semibold : .regular))
-                                .padding(.horizontal, 18).padding(.vertical, 9)
-                                .background(selection == page ? Color.accentColor.opacity(0.17) : Color.clear, in: Capsule())
-                                .foregroundStyle(selection == page ? Color.accentColor : Color.primary)
-                        }.buttonStyle(.plain).accessibilityAddTraits(selection == page ? [.isSelected] : [])
+                        navigationCapsule(page)
                     }
                 }.padding(12)
             }
@@ -70,6 +67,41 @@ struct MediaLibraryView: View {
         .onChange(of: selection) { _ in configureLocalPage() }
     }
 
+    // MARK: 导航胶囊
+
+    /// 导航胶囊：文字 + 水平/垂直留白整体是一个命中区域。
+    ///
+    /// `contentShape(Capsule())` 是需求 8 的关键：只写 `padding` 时留白属于透明区域，
+    /// 命中测试会落到 HStack 上而不是按钮，于是「只有文字能点」。这里把胶囊形状显式声明为
+    /// 命中区域，留白与文字等价可点。留白同时纳入悬停判定，鼠标一进胶囊就有反馈。
+    private func navigationCapsule(_ page: MediaLibraryPage) -> some View {
+        let isSelected = selection == page
+        let isHovered = hoveredPage == page
+        return Button { selection = page } label: {
+            Text(page.title)
+                .font(.callout.weight(isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 9)
+                .frame(minHeight: 34)
+                // 选中底色与悬停底色同源（同一色、不同透明度），避免两种状态看起来像两套控件。
+                .background(capsuleBackground(isSelected: isSelected, isHovered: isHovered), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            if inside { hoveredPage = page } else if hoveredPage == page { hoveredPage = nil }
+        }
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    /// 选中态优先于悬停态；两者都不成立时透明，保持无背景的朴素外观。
+    private func capsuleBackground(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected { return Color.accentColor.opacity(0.17) }
+        if isHovered { return Color.accentColor.opacity(0.09) }
+        return Color.clear
+    }
+
     private var favoriteCollections: some View {
         ScrollView {
             if collectionFavorites.collections.isEmpty {
@@ -86,7 +118,10 @@ struct MediaLibraryView: View {
                             appState.libraryOnlineModels[collection.source]?.selectCollection(collection)
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                OnlineArtwork(url: collection.artworkURL).aspectRatio(1, contentMode: .fit)
+                                // 收藏的歌单/专辑按「收藏夹语义」展示，始终方形
+                                // （需求 10：不把 Bilibili 收藏夹强行改成横向 16:9）。
+                                OnlineArtwork(url: collection.artworkURL, platform: collection.source)
+                                    .aspectRatio(1, contentMode: .fit)
                                 Text(collection.title).lineLimit(2)
                                 Text(collection.source.title).font(.caption).foregroundStyle(.secondary)
                             }

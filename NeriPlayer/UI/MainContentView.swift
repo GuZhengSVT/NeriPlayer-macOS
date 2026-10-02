@@ -8,6 +8,15 @@
 //
 // M2-T8/M8：窗口底部挂一条跨 tab 常驻的浮动播放器，统一承载当前曲目、进度与播放控制。
 // 播放是应用级状态，切 tab 不重建会话；队列在播放栏就地展开。
+//
+// 2026-10-03 播放体验整改：
+//   * 删除旧的「歌词页面」sheet 导航入口（`lyricsPresented`）与相应按钮；歌词改由「歌曲播放页」承载，
+//     桌面悬浮歌词入口保留（在播放器栏与播放页里）。
+//   * 歌曲播放页在主窗口**内容区**展示为一层覆盖视图（不是 sheet、不是独立窗口）：点底部封面或
+//     歌曲信息打开，点页内「返回」回到此前的导航页面 —— 因为只是覆盖，原页面的选中 tab 与滚动
+//     位置都不受影响，播放也完全连续；底部常驻播放器栏仍在，页内不再重复一套播放控制。
+//   * 在根视图挂上统一字体接口（B 提供的 AppTypographyModifier）：它内部观察设置变化并注入
+//     typography，因此设置里的字体/字号改动会即时反映到主窗口、底部栏与播放页。
 
 import SwiftUI
 
@@ -60,7 +69,8 @@ struct MainContentView: View {
     /// 设置存储（可注入，便于测试）。默认使用全局共享实例。
     private let store: SettingsStore
     @State private var selection: MainTab
-    @State private var lyricsPresented = false
+    /// 是否正在展示「歌曲播放页」。
+    @State private var showingNowPlaying = false
     @State private var libraryPage: MediaLibraryPage = .local
     @StateObject private var searchPageModel = SearchPageModel()
 
@@ -84,22 +94,38 @@ struct MainContentView: View {
                 detail
             }
             if let coordinator = appState.onlinePlayback { OnlinePlaybackStatusView(coordinator: coordinator) }
-            FloatingPlayerBar(onLyrics: { lyricsPresented = true })
+            FloatingPlayerBar(onOpenNowPlaying: { showingNowPlaying = true })
         }
         .frame(minWidth: 720, minHeight: 480)
-        .sheet(isPresented: $lyricsPresented) {
-            if let model = appState.lyricsViewModel { LyricsView(model: model) }
-        }
         // M3-T5：外观设置在整个窗口的根上生效，侧栏、状态条与各 tab 一起跟着变。
         // 视图模型缺失（理论上不会发生，设置不依赖任何可失败资源）时保持系统默认外观。
         .preferredColorScheme(appState.settingsViewModel?.appearance.colorScheme)
         .tint(appState.settingsViewModel?.accent.color)
+        // 需求 5：统一字体接口在根上注入，主窗口、底部栏与播放页共用同一份排版设置。
+        .modifier(AppTypographyModifier(model: appState.settingsViewModel))
         }
     }
 
-    /// 详情区。初始化失败时保留占位提示。
+    /// 详情区：歌曲播放页叠在导航页**之上**（而不是替换）。
+    ///
+    /// 用 ZStack 覆盖而不是「showingNowPlaying ? NowPlayingPage : navigationDetail」的替换式写法：
+    /// 覆盖时原页面只是被隐藏，它的 @State（选中 tab、滚动位置、展开状态）都还在，返回时原样可见；
+    /// 替换则会把原页面重新构造一遍，滚动位置会丢。
     @ViewBuilder
     private var detail: some View {
+        ZStack {
+            navigationDetail
+                .opacity(showingNowPlaying ? 0 : 1)
+                .allowsHitTesting(!showingNowPlaying)
+            if showingNowPlaying {
+                NowPlayingPage(onBack: { showingNowPlaying = false })
+            }
+        }
+    }
+
+    /// 原有导航详情：按选中 tab 分发。初始化失败时保留占位提示。
+    @ViewBuilder
+    private var navigationDetail: some View {
         if selection == .home, let online = appState.onlineViewModel, let home = appState.homeViewModel {
             HomeView(onlineViewModel: online, homeViewModel: home, libraryViewModel: appState.libraryViewModel,
                      onExplore: { selectionBinding.wrappedValue = .explore },
@@ -130,6 +156,9 @@ struct MainContentView: View {
     }
 
     /// 左侧导航栏。selection 用自定义 Binding，写入时顺带持久化。
+    ///
+    /// 侧栏文字刻意不写 `.font(...)`：根视图上挂的 AppTypographyModifier 会把 UI 字体与基础字号
+    /// 设在环境里，未显式指定字体的文本自动跟随；这里再指定一次反而会盖掉该设置。
     private var sidebar: some View {
         List(selection: selectionBinding) {
             ForEach(MainTab.allCases) { tab in
@@ -142,10 +171,13 @@ struct MainContentView: View {
     }
 
     /// 选中项读写：更新 @State 的同时把 tab 标识写入设置存储。
+    ///
+    /// 切 tab 时顺带关闭歌曲播放页：用户点侧栏就是想离开播放页，留在覆盖层上会让人以为点击无效。
     private var selectionBinding: Binding<MainTab> {
         Binding(
             get: { selection },
             set: { newValue in
+                showingNowPlaying = false
                 selection = newValue
                 store.set(newValue.rawValue, for: SettingsKeys.lastSelectedTab)
             }

@@ -19,6 +19,7 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
     private var track: Track?
     private var paused = false
     private var alternatives: [SongData] = []
+    private var discoveredSources = Set<MusicSource>()
     private var excluded = Set<String>()
     private var refreshed = Set<String>()
     private var failureInFlight = false
@@ -57,6 +58,7 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
         task?.cancel()
         self.track = track; self.token = token; self.paused = paused
         excluded = []; refreshed = []; alternatives = []; failureInFlight = false
+        discoveredSources = []
         currentSong = song; currentResolvedAudio = nil; lastError = nil; phase = .resolving
         task = Task { [weak self] in
             guard let self else { return }
@@ -67,25 +69,38 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
         guard let track else { return false }
         return !Task.isCancelled && self.token == token && store.isCurrentOnlineRequest(token, trackID: track.id)
     }
-    private func discover(_ song: SongData, token: UUID) async {
-        let sources = MusicSource.allCases.filter { $0 != song.source }
+    @discardableResult
+    private func discover(_ song: SongData, token: UUID) async -> Bool {
+        let remaining = MusicSource.allCases.filter { $0 != song.source && !discoveredSources.contains($0) }
+        let sources: [MusicSource]
+        if song.source == .netease {
+            // 分阶段搜索：Bilibili 不可用后才发起 YouTube 请求，避免慢源阻塞首选源。
+            sources = [.bilibili, .youtubeMusic].filter { remaining.contains($0) }.prefix(1).map { $0 }
+        } else {
+            sources = remaining
+        }
+        guard !sources.isEmpty, valid(token) else { return false }
+        discoveredSources.formUnion(sources)
         let query = [song.title, song.artist].filter { !$0.isEmpty }.joined(separator: " ")
         let result = await searchManager.search(query: query, sources: sources)
-        guard valid(token) else { return }
-        alternatives = result.results.map(\.song)
+        guard valid(token) else { return false }
+        let discovered = result.results.map(\.song)
+        alternatives += discovered
         // Multi-part Bilibili videos can contain the intended song outside P1.
         if let bili = resolver.clients.first(where: { $0.source == .bilibili }) as? BilibiliClient {
-            for candidate in alternatives.filter({ $0.source == .bilibili }).prefix(3) {
+            for candidate in discovered.filter({ $0.source == .bilibili }).prefix(3) {
                 if let pages = try? await bili.pages(for: candidate), valid(token) { alternatives += pages }
             }
         }
+        return valid(token)
     }
     private func resolveCurrent(_ song: SongData, token: UUID) async {
         do {
             // Try the original source before making cross-platform searches.
             var outcome = try await attempt(song, token: token)
-            if case .skipped = outcome, valid(token), alternatives.isEmpty {
-                await discover(song, token: token)
+            while case .skipped(_, let attempts) = outcome, valid(token) {
+                excluded.formUnion(attempts.map(\.songID))
+                guard await discover(song, token: token) else { break }
                 outcome = try await attempt(song, token: token)
             }
             guard valid(token) else { return }
@@ -133,7 +148,6 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
                 } catch { if !valid(token) { return } }
             }
             excluded.insert(audio.song.id)
-            if alternatives.isEmpty { await discover(song, token: token) }
             await resolveCurrent(song, token: token)
         }
     }

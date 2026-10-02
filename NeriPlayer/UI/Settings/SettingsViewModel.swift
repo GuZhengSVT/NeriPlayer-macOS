@@ -53,6 +53,9 @@ public final class SettingsViewModel: ObservableObject {
 
     private let settings: SettingsStore
     private let directoryStore: LibraryDirectoryStore
+    /// 字体设置的变更订阅（需求 5）。歌词窗口也有一个字号滑杆，它直接写 SettingsStore、
+    /// 不经过本对象；不订阅的话，外观页会一直显示打开设置页那一刻的旧值。
+    private var fontObservation: Task<Void, Never>?
     /// 重新扫描一个目录的动作。由持有媒体库视图模型的调用方注入 ——
     /// 设置页不该自己去拿 LibraryViewModel，否则两者会互相引用。
     ///
@@ -90,6 +93,55 @@ public final class SettingsViewModel: ObservableObject {
             settings.value(for: SettingsKeys.compactLyricsFontSize),
             in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
         loadAvailableFonts()
+        observeFontSettings()
+    }
+
+    deinit {
+        fontObservation?.cancel()
+    }
+
+    /// 订阅字体相关的设置键，把「别处写入」的值同步到本地副本。
+    ///
+    /// 为什么需要：歌词设置窗口的字体 / 字号滑杆直接调 LyricsViewModel，落盘时不经过
+    /// 本对象；若这里不订阅，外观页会停留在打开那一刻的旧值。只在值真的不同时写入属性，
+    /// 避免把「自己刚写出去的值」再回灌成一次多余的重绘。
+    private func observeFontSettings() {
+        let stream = settings.changes()
+        fontObservation = Task { [weak self] in
+            for await change in stream {
+                guard !Task.isCancelled, let self else { return }
+                switch change.key {
+                case SettingsKeys.lyricsFontSize.name:
+                    let value = AppTypographyDefaults.clamped(
+                        self.settings.value(for: SettingsKeys.lyricsFontSize),
+                        in: AppTypographyDefaults.lyricsBaseSizeRange, fallback: AppTypographyDefaults.lyricsBaseSize)
+                    if value != self.lyricsFontSize { self.lyricsFontSize = value }
+                case SettingsKeys.lyricsFontFamily.name:
+                    let value = self.settings.value(for: SettingsKeys.lyricsFontFamily)
+                    if value != self.lyricsFontFamily { self.lyricsFontFamily = value }
+                case SettingsKeys.uiFontFamily.name:
+                    let value = self.settings.value(for: SettingsKeys.uiFontFamily)
+                    if value != self.uiFontFamily { self.uiFontFamily = value }
+                case SettingsKeys.uiBaseFontSize.name:
+                    let value = AppTypographyDefaults.clamped(
+                        self.settings.value(for: SettingsKeys.uiBaseFontSize),
+                        in: AppTypographyDefaults.uiBaseSizeRange, fallback: AppTypographyDefaults.uiBaseSize)
+                    if value != self.uiBaseFontSize { self.uiBaseFontSize = value }
+                case SettingsKeys.playerFontSize.name:
+                    let value = AppTypographyDefaults.clamped(
+                        self.settings.value(for: SettingsKeys.playerFontSize),
+                        in: AppTypographyDefaults.playerTextSizeRange, fallback: AppTypographyDefaults.playerTextSize)
+                    if value != self.playerFontSize { self.playerFontSize = value }
+                case SettingsKeys.compactLyricsFontSize.name:
+                    let value = AppTypographyDefaults.clamped(
+                        self.settings.value(for: SettingsKeys.compactLyricsFontSize),
+                        in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
+                    if value != self.compactLyricsFontSize { self.compactLyricsFontSize = value }
+                default:
+                    break
+                }
+            }
+        }
     }
 
     func reloadSettings() {

@@ -211,6 +211,15 @@ private struct HomeSongSectionView: View {
     let onRetry: () -> Void
     let onPlay: (SongData) -> Void
 
+    /// 当前悬停的卡片 id。只用于加深底色，不参与任何尺寸计算 —— 需求 7 明确
+    /// 「悬停反馈不得改变卡片尺寸」，否则横向列表会随鼠标轻微抖动。
+    @State private var hoveredSongID: String?
+
+    /// 行高：52pt 封面 + 卡片上下各 6pt 内边距 = 64pt。固定高度是需求 7「悬停不得改变
+    /// 卡片尺寸」的前提 —— 高度由 GridItem 给定，卡片只填满它，鼠标掠过不会撑高任何一行。
+    private static let rowHeight: CGFloat = 64
+    private static let cardVerticalPadding: CGFloat = 6
+
     var body: some View {
         HomeSection(title: source, systemImage: "music.note") {
             if section.isLoading && section.items.isEmpty {
@@ -222,27 +231,61 @@ private struct HomeSongSectionView: View {
             } else {
                 if let error = section.error { HomeInlineWarning(text: error) }
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHGrid(rows: Array(repeating: GridItem(.fixed(60), spacing: 8), count: 3), spacing: 14) {
+                    LazyHGrid(rows: Array(repeating: GridItem(.fixed(Self.rowHeight), spacing: 8), count: 3), spacing: 14) {
                         ForEach(section.items) { song in
-                            Button { onPlay(song) } label: {
-                                HStack(spacing: 10) {
-                                    OnlineArtwork(url: song.artworkURL).frame(width: 52, height: 52)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(song.title).font(.callout.weight(.medium)).lineLimit(1)
-                                        Text(song.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer(minLength: 0)
-                                    Image(systemName: "play.fill").font(.caption).foregroundStyle(.secondary)
-                                }.frame(width: 300, height: 60, alignment: .leading).contentShape(Rectangle())
-                            }
-                                .buttonStyle(.plain)
-                                .help("播放「\(song.title)」")
+                            songCard(song)
                         }
                     }
                     .padding(.vertical, 2)
                 }
             }
         }
+    }
+
+    /// 单首歌曲卡片。
+    ///
+    /// 底色与内边距是本轮需求 7 的核心：原先相邻歌曲之间没有任何视觉边界，一行末尾的
+    /// 播放三角很容易被读成「播下一首」。加一层低透明度圆角底并留出内边距后，卡片边界一眼可见，
+    /// 但底色刻意做得很淡（0.06/0.11）以免盖过封面。
+    ///
+    /// 悬停只改 `fill`，`frame` 与 `padding` 恒定；着色用 `background(_:in:)` 的现成形状，
+    /// 因此不会触发布局重算，鼠标掠过时卡片既不移动也不变宽。
+    private func songCard(_ song: SongData) -> some View {
+        let isHovered = hoveredSongID == song.id
+        return Button { onPlay(song) } label: {
+            HStack(spacing: 10) {
+                // 网易云的推荐/榜单曲目保持方形；若某首来自 Bilibili，则按 16:9 横向完整显示原图。
+                OnlineArtworkThumbnail(url: song.artworkURL, platform: song.source, height: 52)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(song.title).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(song.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "play.fill").font(.caption).foregroundStyle(.secondary)
+            }
+            // 宽度固定为 300：卡片内边距不能靠挤压内容来换取，否则标题的可见字数会随悬停变化。
+            .frame(width: Self.cardWidth, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, Self.cardVerticalPadding)
+            .background(cardBackground(isHovered: isHovered), in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .help("播放「\(song.title)」")
+        .onHover { inside in
+            if inside { hoveredSongID = song.id } else if hoveredSongID == song.id { hoveredSongID = nil }
+        }
+    }
+
+    /// 卡片内容宽度。300 是旧版卡片的外框宽度，本轮把「内边距」加在外框之外，
+    /// 因此卡片内部可见内容的宽度与位置一字未变，只是外面多了一圈底色与留白。
+    private static let cardWidth: CGFloat = 300
+
+    /// 卡片底色：悬停时在同一色相上加深。两档都保持在低透明度，浅色与深色外观下都能看出
+    /// 边界；与同一分区的 loading/error 占位（同样是「系统语义色 + 低透明度圆角块」）风格一致，
+    /// 切换明暗外观时两边一起变，不会出现某一档失配。
+    private func cardBackground(isHovered: Bool) -> Color {
+        Color.secondary.opacity(isHovered ? 0.11 : 0.06)
     }
 }
 

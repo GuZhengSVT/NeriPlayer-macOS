@@ -143,7 +143,8 @@ struct SearchView: View {
         List {
             ForEach(songs) { song in
                 HStack(spacing: 12) {
-                    OnlineArtwork(url: song.artworkURL).frame(width: 44, height: 44)
+                    // 需求 10：Bilibili 视频封面走 16:9 横向容器并完整显示原图；其余平台保持方形。
+                    OnlineArtworkThumbnail(url: song.artworkURL, platform: song.source, height: 44)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(song.title).lineLimit(1)
                         Text([song.artist, song.album].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
