@@ -1,6 +1,8 @@
 # NeriPlayer macOS
 
-参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前为开发中的 **0.0.9**，与 Android 版版本号独立；尚未发布正式 Release 编译版本。
+参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前版本 **0.1.0**，与 Android 版版本号独立。
+
+0.1.0 是首个正式 Release 编译版本：推 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`，在 macOS runner 上打包并把 DMG 附到 GitHub Release。产物为 unsigned/ad-hoc 包（未配置签名密钥时），首次打开需在「系统设置 → 隐私与安全性」放行，或执行 `xattr -dr com.apple.quarantine /Applications/NeriPlayer.app`。
 
 M9 已提供可分发的 `.app/.dmg` 打包路径：默认输出 unsigned/ad-hoc 包；配置 Developer ID 和 notarytool profile 后由同一脚本完成签名与公证。它仍不是 Android 版的完整替代，平台差异见下文。
 
@@ -37,12 +39,12 @@ swift run NeriPlayer
 创建 unsigned DMG（需要已布置 `Vendor/mpv`）：
 
 ```sh
-VERSION=0.0.9 BUILD_NUMBER=1 Tools/package.sh
+VERSION=0.1.0 BUILD_NUMBER=1 Tools/package.sh
 ```
 
 发布签名与公证需额外设置 `SIGNING_IDENTITY`、`NOTARY_PROFILE`；脚本会把可发现的 Homebrew 动态库复制到 app 内并改写为 `@rpath`。没有证书时 unsigned/ad-hoc 输出仍可用于本机和干净机器的安装验收。
 
-`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本会清空 `dist` 后生成 `dist/NeriPlayer.app` 与 `dist/NeriPlayer-0.0.9.dmg`。打包产物不提交到源码仓库。
+`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本会清空 `dist` 后生成 `dist/NeriPlayer.app` 与 `dist/NeriPlayer-0.1.0.dmg`。打包产物不提交到源码仓库。
 
 在窗口切换到媒体库，选择导入目录，再播放歌曲。可选校验：
 
@@ -95,6 +97,14 @@ macOS 版明确未覆盖或不等价的 Android 能力：Android Service/WorkMan
 
 ## 上游与来源
 
-本轮行为对照基于本地 Android checkout `12351888e64178b145bc612b7d8e40efa7497d95`，歌词子模块 `825661a10101b6b17cdcf8f39e0d5a12ff8d21fd`。在线上游持续变化，不应把当前主分支的全部特性当作本仓库能力。
+本仓库是 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植：**多平台音源解析、签名算法、选轨与降级规则、歌词解析与首页分区等大量逻辑，是逐条对照该 Android 项目的行为重写的**，因此本仓库是其衍生作品。本轮行为对照基于本地 Android checkout `12351888e64178b145bc612b7d8e40efa7497d95`，歌词子模块 `825661a10101b6b17cdcf8f39e0d5a12ff8d21fd`。在线上游持续变化，不应把当前主分支的全部特性当作本仓库能力。
 
-发布前还需补齐本仓库许可证、移植代码来源/署名和第三方依赖许可清单，并核对随包分发的二进制依赖。当前文档不替代这些发布工作。
+- 上游项目：<https://github.com/cwuom/NeriPlayer>（GPL-3.0）
+- 上游作者与贡献者：见上游仓库提交历史
+- 本仓库相对上游的差异：Swift/SwiftUI 原生实现、macOS 平台适配（AppKit、Now Playing、媒体键、桌面歌词窗口、DMG 打包与签名）
+
+## 许可证
+
+本仓库以 **GPL-3.0** 发布，见 [LICENSE](LICENSE)。因为它包含源自上游 Android 项目（GPL-3.0）的移植代码，按 GPL-3.0 的要求，分发本仓库或其编译产物时**必须继续以 GPL-3.0 授权并提供完整对应源码**。
+
+随包分发的第三方二进制依赖（libmpv 及其 ffmpeg/libass/libplacebo 等间接依赖）来自 Homebrew，各自适用其原有许可证，清单与核对仍需在正式分发前逐项确认；本仓库当前只保证源码层面的许可证合规。

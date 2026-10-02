@@ -275,7 +275,7 @@ public final class PlaybackSessionRecorder: @unchecked Sendable {
             let belowStep: Bool
             if let state, let lastWritten {
                 belowStep = SessionSignature(state) == SessionSignature(lastWritten)
-                    && abs(state.position - lastWritten.position) < positionStep
+                    && Swift.abs(state.position - lastWritten.position) < positionStep
             } else {
                 belowStep = false
             }

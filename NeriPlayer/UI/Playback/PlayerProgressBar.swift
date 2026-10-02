@@ -59,7 +59,7 @@ struct PlayerProgressSeekResolution: Equatable {
     /// 宁可交回引擎，也不要让进度条永久停在一个算不出来的目标上。
     static func isConfirmed(pending: Double, position: Double, tolerance: Double) -> Bool {
         guard pending.isFinite, position.isFinite else { return true }
-        return abs(position - pending) <= max(0, tolerance)
+        return Swift.abs(position - pending) <= max(0, tolerance)
     }
 
     /// 计算显示位置与确认状态。

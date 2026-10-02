@@ -210,7 +210,7 @@ public struct AppTypography: Equatable {
         for member in members {
             guard let name = member.first as? String else { continue }
             let memberWeight = member.count > 2 ? (member[2] as? NSNumber)?.intValue ?? 5 : 5
-            let delta = abs(memberWeight - target)
+            let delta = Swift.abs(memberWeight - target)
             if delta < bestDelta { bestDelta = delta; bestName = name }
         }
         return bestName ?? (members.first?.first as? String)

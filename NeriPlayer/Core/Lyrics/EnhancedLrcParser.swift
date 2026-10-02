@@ -407,7 +407,7 @@ public struct EnhancedLrcParser: LyricsParser {
                     || (kind(of: line) == .accompaniment && kind(of: nextLine) == .main)
                     || kind(of: nextLine) == .synced
 
-                if isCompatibleType && abs(line.start - nextLine.start) <= 150 {
+                if isCompatibleType && Swift.abs(line.start - nextLine.start) <= 150 {
                     let nextContent = nextLine.trimmedContent
                     // 候选译文是制作信息行就跳过它，继续往后找（不是放弃整行）。
                     if LrcMetadataHelper.isCreditLine(nextContent) { continue }

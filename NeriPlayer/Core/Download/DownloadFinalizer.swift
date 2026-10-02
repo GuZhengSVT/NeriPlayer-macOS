@@ -23,7 +23,7 @@ struct DownloadFinalizer: Sendable {
             if let codec = try? engine.getString("audio-codec-name"), !codec.isEmpty {
                 let actual = (try? engine.getDouble("duration")) ?? 0
                 if let expectedDuration, expectedDuration > 0, actual > 0,
-                   abs(actual - expectedDuration) > max(3, expectedDuration * 0.02) { throw DownloadFailure.integrity }
+                   Swift.abs(actual - expectedDuration) > max(3, expectedDuration * 0.02) { throw DownloadFailure.integrity }
                 return
             }
             try await Task.sleep(nanoseconds: 50_000_000)

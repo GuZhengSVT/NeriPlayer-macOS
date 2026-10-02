@@ -21,12 +21,31 @@ jobs:
           swift --version
       - name: Vendor libmpv
         run: Tools/fetch-mpv.sh
+      # VERSION 必须从 tag 推导：package.sh 的默认值是仓库当前的开发版本号，
+      # 不传就会让 v0.1.0 的标签产出仍自称 0.0.9 的 .app（Info.plist 与「关于」页都错）。
+      # tag 形如 v0.1.0，去掉前导 v 即 SemVer 版本。
+      - name: Derive version from tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag 不是 vX.Y.Z 形式：$GITHUB_REF_NAME" >&2; exit 1; }
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "version=$version"
       - name: Package app and DMG
         env:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY || '-' }}
           NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE || '' }}
+          VERSION: ${{ steps.version.outputs.value }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: Tools/package.sh
+      # 打包完成后回读 Info.plist，把「版本号没跟上 tag」这类错误挡在发布之前。
+      - name: Verify packaged version matches tag
+        env:
+          EXPECTED: ${{ steps.version.outputs.value }}
+        run: |
+          actual="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/NeriPlayer.app/Contents/Info.plist)"
+          echo "Info.plist CFBundleShortVersionString=$actual (expected $EXPECTED)"
+          [[ "$actual" == "$EXPECTED" ]] || { echo "打包产物版本与 tag 不一致" >&2; exit 1; }
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:

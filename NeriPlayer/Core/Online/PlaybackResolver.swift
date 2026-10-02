@@ -78,7 +78,7 @@ public struct PlaybackResolver: Sendable {
             let score = Self.score(reference: song, candidate: candidate)
             guard score.title >= 18, score.total >= minimumFallbackScore else { continue }
             if let expected = validDuration(song.duration), let actual = validDuration(candidate.duration),
-               abs(expected - actual) > durationTolerance { continue }
+               Swift.abs(expected - actual) > durationTolerance { continue }
             fallback.append(PlaybackCandidate(song: candidate, score: score))
         }
         fallback.sort {
@@ -167,7 +167,7 @@ public struct PlaybackResolver: Sendable {
     /// Android-inspired duration weighting: <=3s is strongest, then increasingly weaker tolerance.
     public static func durationScore(_ lhs: Double?, _ rhs: Double?) -> Int {
         guard let lhs = validDuration(lhs), let rhs = validDuration(rhs) else { return 0 }
-        let difference = abs(lhs - rhs)
+        let difference = Swift.abs(lhs - rhs)
         if difference <= 3 { return 40 }
         if difference <= 5 { return 30 }
         if difference <= 10 { return 20 }

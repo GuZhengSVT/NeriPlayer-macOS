@@ -55,7 +55,7 @@ final class FloatingLyricsPanelController {
         guard let panel else { return }
         var frame = panel.frame
         let height = Self.panelHeight(for: compactFontSize)
-        guard abs(frame.height - height) > 0.5 else { return }
+        guard Swift.abs(frame.height - height) > 0.5 else { return }
         // 面板贴底显示：向上生长，保持底边不动。
         frame.origin.y += frame.height - height
         frame.size.height = height
