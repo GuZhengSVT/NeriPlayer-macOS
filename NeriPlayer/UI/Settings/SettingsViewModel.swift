@@ -13,6 +13,7 @@
 // 目录列表的读写委托给 LibraryDirectoryStore：本类只负责「改完刷新本地副本」。
 
 import Foundation
+import SwiftUI
 
 /// 设置页视图模型。钉在 MainActor 上：@Published 的写入与视图读取都只在主线程。
 @MainActor
@@ -32,6 +33,21 @@ public final class SettingsViewModel: ObservableObject {
     @Published public private(set) var directories: [LibraryDirectory]
     /// 最近一次操作的反馈文案；nil 表示没有需要展示的内容。
     @Published public private(set) var statusMessage: String?
+    // MARK: 字体设置（需求 5）
+    /// UI 字体家族标识。
+    @Published public private(set) var uiFontFamily: String
+    /// UI 基础字号。
+    @Published public private(set) var uiBaseFontSize: Double
+    /// 播放器字号。
+    @Published public private(set) var playerFontSize: Double
+    /// 歌词字体家族标识。
+    @Published public private(set) var lyricsFontFamily: String
+    /// 歌词字号。与歌词窗口的滑杆共用 `lyricsFontSize` 这个键，两处永远一致。
+    @Published public private(set) var lyricsFontSize: Double
+    /// 底部播放栏歌词行字号。
+    @Published public private(set) var compactLyricsFontSize: Double
+    /// 本机可用字体家族（含「系统字体」以外的真实家族），仅在设置页出现时取一次。
+    @Published public private(set) var availableFontFamilies: [String] = []
 
     // MARK: 依赖
 
@@ -59,6 +75,21 @@ public final class SettingsViewModel: ObservableObject {
             settings.value(for: SettingsKeys.defaultVolume)
         )
         self.directories = self.directoryStore.all()
+        self.uiFontFamily = settings.value(for: SettingsKeys.uiFontFamily)
+        self.uiBaseFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.uiBaseFontSize), in: AppTypographyDefaults.uiBaseSizeRange,
+            fallback: AppTypographyDefaults.uiBaseSize)
+        self.playerFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.playerFontSize), in: AppTypographyDefaults.playerTextSizeRange,
+            fallback: AppTypographyDefaults.playerTextSize)
+        self.lyricsFontFamily = settings.value(for: SettingsKeys.lyricsFontFamily)
+        self.lyricsFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.lyricsFontSize), in: AppTypographyDefaults.lyricsBaseSizeRange,
+            fallback: AppTypographyDefaults.lyricsBaseSize)
+        self.compactLyricsFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.compactLyricsFontSize),
+            in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
+        loadAvailableFonts()
     }
 
     func reloadSettings() {
@@ -66,6 +97,20 @@ public final class SettingsViewModel: ObservableObject {
         accent = AccentColorOption(storedValue: settings.value(for: SettingsKeys.accentColor))
         resumePlaybackOnLaunch = settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
         defaultVolume = PlaybackBehaviorDefaults.clampedVolume(settings.value(for: SettingsKeys.defaultVolume))
+        uiFontFamily = settings.value(for: SettingsKeys.uiFontFamily)
+        uiBaseFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.uiBaseFontSize), in: AppTypographyDefaults.uiBaseSizeRange,
+            fallback: AppTypographyDefaults.uiBaseSize)
+        playerFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.playerFontSize), in: AppTypographyDefaults.playerTextSizeRange,
+            fallback: AppTypographyDefaults.playerTextSize)
+        lyricsFontFamily = settings.value(for: SettingsKeys.lyricsFontFamily)
+        lyricsFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.lyricsFontSize), in: AppTypographyDefaults.lyricsBaseSizeRange,
+            fallback: AppTypographyDefaults.lyricsBaseSize)
+        compactLyricsFontSize = AppTypographyDefaults.clamped(
+            settings.value(for: SettingsKeys.compactLyricsFontSize),
+            in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
         refreshDirectories()
     }
 
@@ -84,6 +129,87 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     // MARK: 播放行为
+
+    // MARK: 字体（需求 5）
+
+    /// UI 字体家族。未知家族由 `TypographyFontFamily.resolved` 夹回系统字体后再落盘 ——
+    /// 存进去的一定是本机可渲染的值，读取侧不必再防御一次。
+    public func setUIFontFamily(_ family: String) {
+        let resolved = TypographyFontFamily.resolved(family, available: availableFontSet)
+        guard resolved != uiFontFamily else { return }
+        uiFontFamily = resolved
+        settings.set(resolved, for: SettingsKeys.uiFontFamily)
+    }
+
+    public func setUIBaseFontSize(_ value: Double) {
+        let clamped = AppTypographyDefaults.clamped(
+            value, in: AppTypographyDefaults.uiBaseSizeRange, fallback: AppTypographyDefaults.uiBaseSize)
+        guard clamped != uiBaseFontSize else { return }
+        uiBaseFontSize = clamped
+        settings.set(clamped, for: SettingsKeys.uiBaseFontSize)
+    }
+
+    public func setPlayerFontSize(_ value: Double) {
+        let clamped = AppTypographyDefaults.clamped(
+            value, in: AppTypographyDefaults.playerTextSizeRange, fallback: AppTypographyDefaults.playerTextSize)
+        guard clamped != playerFontSize else { return }
+        playerFontSize = clamped
+        settings.set(clamped, for: SettingsKeys.playerFontSize)
+    }
+
+    public func setLyricsFontFamily(_ family: String) {
+        let resolved = TypographyFontFamily.resolved(family, available: availableFontSet)
+        guard resolved != lyricsFontFamily else { return }
+        lyricsFontFamily = resolved
+        settings.set(resolved, for: SettingsKeys.lyricsFontFamily)
+    }
+
+    /// 歌词字号。与歌词窗口滑杆共用同一个键，因此两边都会立刻看到对方的变化。
+    public func setLyricsFontSize(_ value: Double) {
+        let clamped = AppTypographyDefaults.clamped(
+            value, in: AppTypographyDefaults.lyricsBaseSizeRange, fallback: AppTypographyDefaults.lyricsBaseSize)
+        guard clamped != lyricsFontSize else { return }
+        lyricsFontSize = clamped
+        settings.set(clamped, for: SettingsKeys.lyricsFontSize)
+    }
+
+    public func setCompactLyricsFontSize(_ value: Double) {
+        let clamped = AppTypographyDefaults.clamped(
+            value, in: AppTypographyDefaults.compactLyricsSizeRange, fallback: AppTypographyDefaults.compactLyricsSize)
+        guard clamped != compactLyricsFontSize else { return }
+        compactLyricsFontSize = clamped
+        settings.set(clamped, for: SettingsKeys.compactLyricsFontSize)
+    }
+
+    /// 把字体设置恢复到默认值。逐键 reset 会各自广播一次变更，根视图因此逐项刷新；
+    /// 不一次性清空所有键，避免把主题、目录等无关设置也一起重置。
+    public func restoreTypographyDefaults() {
+        settings.reset(SettingsKeys.uiFontFamily)
+        settings.reset(SettingsKeys.uiBaseFontSize)
+        settings.reset(SettingsKeys.playerFontSize)
+        settings.reset(SettingsKeys.lyricsFontFamily)
+        settings.reset(SettingsKeys.lyricsFontSize)
+        settings.reset(SettingsKeys.compactLyricsFontSize)
+        uiFontFamily = TypographyFontFamily.systemID
+        uiBaseFontSize = AppTypographyDefaults.uiBaseSize
+        playerFontSize = AppTypographyDefaults.playerTextSize
+        lyricsFontFamily = TypographyFontFamily.systemID
+        lyricsFontSize = AppTypographyDefaults.lyricsBaseSize
+        compactLyricsFontSize = AppTypographyDefaults.compactLyricsSize
+        statusMessage = "字体设置已恢复默认"
+    }
+
+    /// 本机可用字体家族集合（含系统字体哨兵），供字体选择器与写入侧夹取共用。
+    private var availableFontSet: Set<String> {
+        Set(availableFontFamilies + [TypographyFontFamily.systemID])
+    }
+
+    /// 枚举本机字体家族。列表在设置页打开时取一次：`NSFontManager.availableFontFamilies`
+    /// 会读取字体目录，放在渲染路径上反复调用没有必要。
+    private func loadAvailableFonts() {
+        let families = TypographyFontFamily.availableFamilies()
+        availableFontFamilies = families.isEmpty ? [TypographyFontFamily.systemID] : families
+    }
 
     public func setResumePlaybackOnLaunch(_ enabled: Bool) {
         guard enabled != resumePlaybackOnLaunch else { return }

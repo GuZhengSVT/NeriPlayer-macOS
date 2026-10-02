@@ -138,6 +138,7 @@ public enum SettingsKeys {
     /// 不需要每加一个字段就改一次设置层。空 Data 表示「没有配置过」。
     public static let libraryDirectories = SettingsKey<Data>("libraryDirectories", default: Data())
     /// M4: lyric presentation and per-file association/timing preferences.
+    /// 需求 5 起，这个键同时是「外观 → 歌词字号」与歌词窗口滑杆的唯一存储：两处共用同一个值。
     public static let lyricsFontSize = SettingsKey<Double>("lyricsFontSize", default: 28)
     public static let lyricsBlur = SettingsKey<Bool>("lyricsBlur", default: false)
     public static let lyricsTranslation = SettingsKey<Bool>("lyricsTranslation", default: true)
@@ -146,6 +147,17 @@ public enum SettingsKeys {
     public static let lyricsOffsets = SettingsKey<Data>("lyricsOffsets", default: Data())
     /// M8-T4/T6: persisted playback filters, fades and optional exclusive output.
     public static let audioEffects = SettingsKey<Data>("audioEffects", default: Data())
+    // MARK: 需求 5：外观与个性化的字体设置
+    /// UI 字体家族标识。取值见 `TypographyFontFamily.systemID`（系统字体）或本机家族名。
+    public static let uiFontFamily = SettingsKey<String>("uiFontFamily", default: TypographyFontFamily.systemID)
+    /// UI 基础字号。`AppTypography.uiScale` 由它相对默认 14pt 换算得到。
+    public static let uiBaseFontSize = SettingsKey<Double>("uiBaseFontSize", default: 14)
+    /// 播放器字号（底部播放栏标题、播放页曲目信息等）。
+    public static let playerFontSize = SettingsKey<Double>("playerFontSize", default: 17)
+    /// 歌词字体家族标识。
+    public static let lyricsFontFamily = SettingsKey<String>("lyricsFontFamily", default: TypographyFontFamily.systemID)
+    /// 底部播放栏歌词行字号。
+    public static let compactLyricsFontSize = SettingsKey<Double>("compactLyricsFontSize", default: 18)
 }
 
 // MARK: - 变更事件

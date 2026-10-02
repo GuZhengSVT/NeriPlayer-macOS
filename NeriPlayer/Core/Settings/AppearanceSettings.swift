@@ -92,3 +92,64 @@ public enum PlaybackBehaviorDefaults {
         return min(max(value, volumeRange.lowerBound), volumeRange.upperBound)
     }
 }
+
+// MARK: - 字体家族（需求 5）
+
+/// 字体家族的稳定标识与展示名。
+///
+/// 放在 Core 而不是 UI：设置键的默认值要用到「系统字体」这个哨兵标识，
+/// 而设置层不该依赖 AppKit。枚举本机可用字体（`NSFontManager`）的部分放在
+/// UI/Appearance/AppTypography.swift 的扩展里，保持 Core 只依赖 Foundation。
+public enum TypographyFontFamily {
+
+    /// 「系统字体」的稳定标识（持久化用）。刻意用一个不可能与真实家族重名的哨兵值。
+    public static let systemID = "__neri_system__"
+    /// 「系统字体」的展示名。
+    public static let systemDisplayName = "系统字体"
+
+    /// 设置页展示名：系统字体给中文名，其余用家族本名。
+    public static func displayName(for family: String) -> String {
+        let trimmed = family.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == systemID ? systemDisplayName : trimmed
+    }
+
+    /// 纯函数版本的可用性判定：空值或未知家族回落到系统字体。
+    public static func resolved(_ stored: String, available: Set<String>) -> String {
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != systemID else { return systemID }
+        return available.contains(trimmed) ? trimmed : systemID
+    }
+}
+
+// MARK: - 字体默认值与取值范围（需求 5）
+
+/// 外观页字体设置的默认值与合法区间。
+///
+/// 与 `PlaybackBehaviorDefaults` 同一个思路：滑杆范围与读取侧夹取范围共用一组常量，
+/// 避免「滑杆给一个区间、读取侧按另一个区间解释」这类只能靠人工比对两处代码才能发现的不一致。
+public enum AppTypographyDefaults {
+
+    /// UI 基础字号默认值（相对它缩放 `AppTypography.uiScale`）。
+    public static let uiBaseSize: Double = 14
+    /// 播放器字号默认值（底部栏标题、播放页曲目信息等）。
+    public static let playerTextSize: Double = 17
+    /// 底部歌词字号默认值。
+    public static let compactLyricsSize: Double = 18
+    /// 歌词字号默认值。与 M4 的歌词偏好沿用同一个数值。
+    public static let lyricsBaseSize: Double = 28
+
+    /// UI 基础字号区间。
+    public static let uiBaseSizeRange: ClosedRange<Double> = 11...20
+    /// 播放器字号区间。
+    public static let playerTextSizeRange: ClosedRange<Double> = 12...28
+    /// 底部歌词字号区间。
+    public static let compactLyricsSizeRange: ClosedRange<Double> = 10...32
+    /// 歌词字号区间。与歌词窗口既有滑杆（16–44）保持一致。
+    public static let lyricsBaseSizeRange: ClosedRange<Double> = 16...44
+
+    /// 把任意输入夹到合法区间；非有限值（NaN / 无穷）回落到默认值。
+    public static func clamped(_ value: Double, in range: ClosedRange<Double>, fallback: Double) -> Double {
+        guard value.isFinite else { return fallback }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+}
