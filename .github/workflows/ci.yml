@@ -81,6 +81,14 @@ jobs:
       - name: swift test
         run: swift test
 
+      # release 构建必须单独跑一遍：`swift build` 默认是 debug，而发布产物是 `-O`。
+      # 代价是实测出来的：0.1.0 第一次打 tag 时，Swift 6.1 的 -O 优化器在
+      # HTTPAudioDownloader.download 上触发 SIL ownership 校验崩溃（signal 6），
+      # 而同一份代码 debug 构建完全正常 —— 于是这个问题一路躲到发布才暴露。
+      # 只在发布时才发现构建失败的成本很高（tag 已推、工作流已跑），故纳入常规 CI。
+      - name: swift build (release)
+        run: swift build -c release --product NeriPlayer
+
       # --quiet：只有 error 才非零退出，warning 放行（与 .swiftlint.yml 的强度设定一致）。
       # 复用仓库脚本，保证 CI 与本地 Tools/run-swiftlint.sh 行为一致。
       - name: SwiftLint (errors fail, warnings pass)
