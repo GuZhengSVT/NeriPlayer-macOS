@@ -39,6 +39,12 @@ jobs:
     runs-on: macos-15
     # 冷缓存 + 依赖编译的实测耗时通常数分钟；30 分钟是兜底，防止挂死占满队列。
     timeout-minutes: 30
+    env:
+      # 与 release.yml 用同一个 Xcode，理由见那边的注释：macos-15 默认的 Xcode 16.4
+      # （Swift 6.1.2）在 -O 下优化 HTTPAudioDownloader.download 时会崩在
+      # NonTransparentFunctionOwnershipModelEliminator 的 SIL ownership 校验上。
+      # CI 必须和发布用同一工具链，否则「CI 绿、发布红」会再次发生。
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
 
     steps:
       - name: Checkout
@@ -46,6 +52,12 @@ jobs:
 
       - name: Show toolchain
         run: |
+          # 固定路径可能随 runner 镜像更新而消失；先显式校验，避免退化成难懂的编译错误。
+          if [[ ! -d "$DEVELOPER_DIR" ]]; then
+            echo "找不到 $DEVELOPER_DIR；runner 镜像可能已更新，请改用镜像中实际存在的 Xcode。" >&2
+            ls -d /Applications/Xcode*.app >&2 || true
+            exit 1
+          fi
           sw_vers
           swift --version
           xcodebuild -version

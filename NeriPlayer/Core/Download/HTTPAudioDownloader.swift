@@ -1,8 +1,5 @@
 // HTTPAudioDownloader.swift
 // M6: Android-compatible strong ETag resume rules, durable checkpoints and bounded Range reads.
-// CryptoKit 只为 SHA256：断点续传的增量哈希由 DownloadStorage 提供，但它的类型要在这里写出
-// （consumeBody 的 inout 参数），所以本文件需要直接 import。
-import CryptoKit
 import Foundation
 
 struct HTTPAudioDownloader: AudioDownloading {
@@ -92,81 +89,37 @@ struct HTTPAudioDownloader: AudioDownloading {
             let expectedBody = range.map { $0.end - $0.start + 1 } ?? total
             try Self.checkSpace(root, needed: total.map { max(0, $0 - position) } ?? Int64(chunkSize))
             let ext = Self.fileExtension(url: audio.url, mime: mime)
-            // body 的消费单独成方法：一是让「边写盘边推进 checkpoint」这条最有状态的逻辑自成一段，
-            // 二是把 `for try await` 异步序列循环从本方法里挪出去 —— 留在同一个函数里会让
-            // 它同时持有 handle / hash / position / checkpoint 四份可变状态跨越 await 边界，
-            // 是本方法最重的一段（Swift 6.1 的 -O 优化器曾在这里触发 SIL 校验崩溃）。
-            let outcome = try await consumeBody(
-                bytes, handle: handle, hash: &hash, file: file, sidecar: sidecar, key: key,
-                validator: Self.validator(response), total: total, ext: ext,
-                start: position, expectedBody: expectedBody, progress: progress
-            )
-            position = outcome.position
-            if let saved = outcome.checkpoint { checkpoint = saved }
-            let bodyBytes = outcome.bodyBytes
+            var buffer = Data()
+            var bodyBytes: Int64 = 0
+            var lastCheckpoint = position
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                buffer.append(byte); bodyBytes += 1
+                if let expectedBody, bodyBytes > expectedBody { throw DownloadFailure.integrity }
+                if buffer.count >= 64 * 1024 {
+                    try handle.write(contentsOf: buffer); hash.update(data: buffer)
+                    position += Int64(buffer.count); buffer.removeAll(keepingCapacity: true)
+                    if position - lastCheckpoint >= Int64(chunkSize) {
+                        checkpoint = try Self.save(sidecar: sidecar, handle: handle, fields: CheckpointFields(
+                            operationID: file.lastPathComponent, key: key, validator: Self.validator(response), total: total,
+                            position: position, ext: ext, digest: try DownloadStorage.digest(file, count: position)))
+                        lastCheckpoint = position
+                        await progress(DownloadProgress(received: position, total: total))
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            if !buffer.isEmpty { try handle.write(contentsOf: buffer); hash.update(data: buffer); position += Int64(buffer.count) }
+            checkpoint = try Self.save(sidecar: sidecar, handle: handle, fields: CheckpointFields(
+                operationID: file.lastPathComponent, key: key, validator: Self.validator(response), total: total,
+                position: position, ext: ext, digest: try DownloadStorage.digest(file, count: position)))
+            await progress(DownloadProgress(received: position, total: total))
             guard bodyBytes > 0, expectedBody == nil || bodyBytes == expectedBody else { throw DownloadFailure.integrity }
             if response.statusCode == 200 || position == total {
                 guard position > 0 else { throw DownloadFailure.integrity }
                 return DownloadPayload(file: file, fileExtension: ext, bytes: position)
             }
         }
-    }
-
-    /// 一次响应 body 的消费结果：写盘了多少字节、最终 position、以及最新 checkpoint。
-    struct BodyOutcome {
-        var position: Int64
-        var bodyBytes: Int64
-        var checkpoint: TransferCheckpoint?
-    }
-
-    /// 把一次响应的 body 流式写入文件，并按 chunkSize 周期性落 checkpoint。
-    ///
-    /// 单独成方法的理由见调用点：这段同时跨越 await 边界持有 handle/hash/position/checkpoint
-    /// 四份可变状态，是原方法里最重的一部分（Swift 6.1 的 -O 优化器曾在此触发编译器崩溃）。
-    /// 语义与原内联循环逐行等价：64 KiB 聚合写、每 chunkSize 存一次 checkpoint 并回调进度、
-    /// 结束后再存一次并回调一次。
-    private func consumeBody(
-        _ bytes: URLSession.AsyncBytes,
-        handle: FileHandle,
-        hash: inout SHA256,
-        file: URL,
-        sidecar: URL,
-        key: String,
-        validator: String?,
-        total: Int64?,
-        ext: String,
-        start: Int64,
-        expectedBody: Int64?,
-        progress: @escaping @Sendable (DownloadProgress) async -> Void
-    ) async throws -> BodyOutcome {
-        var position = start
-        var buffer = Data()
-        var bodyBytes: Int64 = 0
-        var lastCheckpoint = position
-        var checkpoint: TransferCheckpoint?
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            buffer.append(byte); bodyBytes += 1
-            if let expectedBody, bodyBytes > expectedBody { throw DownloadFailure.integrity }
-            if buffer.count >= 64 * 1024 {
-                try handle.write(contentsOf: buffer); hash.update(data: buffer)
-                position += Int64(buffer.count); buffer.removeAll(keepingCapacity: true)
-                if position - lastCheckpoint >= Int64(chunkSize) {
-                    checkpoint = try Self.save(sidecar: sidecar, handle: handle, fields: CheckpointFields(
-                        operationID: file.lastPathComponent, key: key, validator: validator, total: total,
-                        position: position, ext: ext, digest: try DownloadStorage.digest(file, count: position)))
-                    lastCheckpoint = position
-                    await progress(DownloadProgress(received: position, total: total))
-                }
-            }
-        }
-        try Task.checkCancellation()
-        if !buffer.isEmpty { try handle.write(contentsOf: buffer); hash.update(data: buffer); position += Int64(buffer.count) }
-        checkpoint = try Self.save(sidecar: sidecar, handle: handle, fields: CheckpointFields(
-            operationID: file.lastPathComponent, key: key, validator: validator, total: total,
-            position: position, ext: ext, digest: try DownloadStorage.digest(file, count: position)))
-        await progress(DownloadProgress(received: position, total: total))
-        return BodyOutcome(position: position, bodyBytes: bodyBytes, checkpoint: checkpoint)
     }
 
     static func checkSpace(_ root: URL, needed: Int64) throws {

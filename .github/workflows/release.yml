@@ -12,13 +12,28 @@ jobs:
   package:
     runs-on: macos-15
     timeout-minutes: 45
+    env:
+      # 必须显式选 Xcode：macos-15 runner 的默认 Xcode 是 16.4（Swift 6.1.2），
+      # 它的 -O 优化器在本工程上有编译器缺陷 —— 优化 HTTPAudioDownloader.download 时
+      # NonTransparentFunctionOwnershipModelEliminator 触发 SIL ownership 校验崩溃
+      # （signal 6，报 Optional<TransferCheckpoint> 的 load_borrow 缺失 enclosing values）。
+      # debug 构建不触发，因此只有 release 打包会挂。镜像里装有 Xcode 26.x，
+      # 其 Swift 已修掉该缺陷，故固定到 26.3 并显式 DEVELOPER_DIR。
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Show toolchain
         run: |
+          # 固定路径可能随 runner 镜像更新而消失；先显式校验，避免退化成难懂的编译错误。
+          if [[ ! -d "$DEVELOPER_DIR" ]]; then
+            echo "找不到 $DEVELOPER_DIR；runner 镜像可能已更新，请改用镜像中实际存在的 Xcode。" >&2
+            ls -d /Applications/Xcode*.app >&2 || true
+            exit 1
+          fi
           sw_vers
           swift --version
+          xcodebuild -version
       - name: Vendor libmpv
         run: Tools/fetch-mpv.sh
       # VERSION 必须从 tag 推导：package.sh 的默认值是仓库当前的开发版本号，
