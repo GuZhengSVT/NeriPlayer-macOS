@@ -2,7 +2,7 @@
 
 参考 [cwuom/NeriPlayer](https://github.com/cwuom/NeriPlayer) 的原生 macOS 移植实验，使用 SwiftUI、libmpv、GRDB 和 TagLibSwift。当前版本 **0.1.0**，与 Android 版版本号独立。
 
-**下载**：[NeriPlayer 0.1.0](https://github.com/GuZhengSVT/NeriPlayer-macOS/releases/latest)（`NeriPlayer-0.1.0.dmg`，要求 macOS 13+ / Apple Silicon）。
+**下载**：[NeriPlayer 0.1.0](https://github.com/GuZhengSVT/NeriPlayer-macOS/releases/latest)（`NeriPlayer-0.1.0.dmg`，Apple Silicon；最低系统版本必须以包内依赖为准，当前本机已有包实际包含要求 macOS 27 的动态库，不能据此宣称支持 macOS 13）。
 
 首个正式 Release 编译版本。推 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`，在 macOS runner 上打包并把 DMG 附到 GitHub Release。产物为 ad-hoc 签名、未经公证（未配置签名密钥时），首次打开会被 Gatekeeper 拦截，需在「系统设置 → 隐私与安全性」放行，或执行 `xattr -dr com.apple.quarantine /Applications/NeriPlayer.app`。
 
@@ -46,7 +46,22 @@ VERSION=0.1.0 BUILD_NUMBER=1 Tools/package.sh
 
 发布签名与公证需额外设置 `SIGNING_IDENTITY`、`NOTARY_PROFILE`；脚本会把可发现的 Homebrew 动态库复制到 app 内并改写为 `@rpath`。没有证书时 unsigned/ad-hoc 输出仍可用于本机和干净机器的安装验收。
 
-`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本会清空 `dist` 后生成 `dist/NeriPlayer.app` 与 `dist/NeriPlayer-0.1.0.dmg`。打包产物不提交到源码仓库。
+`swift build` / `swift test` 只更新构建目录，不会更新已存在的 `.app`。要运行最新界面改动，需重新执行 `bash Tools/package.sh`；脚本先在临时目录构建并检查，全部成功后才把 `.app/.dmg` 放入 `dist`，已有同名产物保留为 `.previous-时间戳`。打包产物不提交到源码仓库。
+
+打包默认要求整个二进制依赖闭包符合 macOS 13；任一动态库要求更高系统或引用包外非系统库就会失败。`Tools/check-app-compatibility.py dist/NeriPlayer.app --minimum 13.0` 可独立检查已有包。本机检查发现当前依赖闭包要求 macOS 27；旧系统兼容性仍需使用兼容依赖重新构建，修改 Mach-O 版本字段不构成兼容。
+
+开发验证可显式使用 `MIN_MACOS_VERSION=auto`，把包的最低系统版本设为依赖实际要求。无人值守界面验证使用独立 bundle identifier 和临时数据目录，平台凭据仅在内存中，不读取用户 Keychain。例如：
+
+```sh
+DIST_DIR="$PWD/dist/validation" MIN_MACOS_VERSION=auto \
+VALIDATION_ROOT=/tmp/NeriPlayer-validation BUILD_NUMBER=2 bash Tools/package.sh
+```
+
+验证包与正式包的账号和数据互不共享，不发布该验证包；它不能替代真实登录、旧版系统和硬件验收。
+
+## Keychain 授权
+
+正式包的音乐平台凭据仍保存在 Keychain。现有 ad-hoc 包的身份是具体构建哈希，重新构建后可能再次要求授权；长期应使用稳定的代码签名身份和 bundle identifier，并由用户为该身份选择“始终允许”。当前机器没有可用签名 identity，本轮不创建证书或改变现有凭据的访问权限。首次所需授权不能由工程测试绕过；隔离验证包和公共音源测试则不需要读取已有 token。
 
 在窗口切换到媒体库，选择导入目录，再播放歌曲。可选校验：
 
@@ -90,6 +105,7 @@ macOS 版明确未覆盖或不等价的 Android 能力：Android Service/WorkMan
 
 - [迁移规划](移植规划.md)：里程碑目标，不是全部功能已完成的声明。
 - [代码审查与验证记录](docs/code-review-2026-09-30.md)：本轮缺陷、回归测试、验证结果及后续优先级。
+- [2026-10-14 独立整改记录](docs/remediation-2026-10-14.md)：问题证据、并行文件边界、验收任务及最新完成情况。
 - [歌词移植笔记](docs/m4-lyrics-notes.md)、[在线音源笔记](docs/m5-online-notes.md)、[M5 验收记录](docs/acceptance/m5.md)、[M6 验收记录](docs/acceptance/m6.md) 与 [音效 ADR](docs/audio-effects-adr.md)。
 - [同步与备份笔记](docs/m7-sync-notes.md)、[M7 验收记录](docs/acceptance/m7.md)、[同步快照 JSON Schema](docs/sync-snapshot.schema.json)。
 - [M8 验收记录](docs/acceptance/m8.md)：桌面播放器、Metal、音效、ListenTogether 与人工验收边界。

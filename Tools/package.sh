@@ -12,6 +12,11 @@ case "$DIST_DIR" in
   "$ROOT_DIR"/dist|"$ROOT_DIR"/dist/*) ;;
   *) fail "DIST_DIR must stay inside the repository dist directory" ;;
 esac
+OUTPUT_DIR="$DIST_DIR"
+mkdir -p "$ROOT_DIR/.build"
+STAGING_DIR="$(mktemp -d "$ROOT_DIR/.build/package.XXXXXX")"
+trap 'rm -rf "$STAGING_DIR"' EXIT
+DIST_DIR="$STAGING_DIR"
 APP_NAME="NeriPlayer"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
@@ -19,12 +24,19 @@ VERSION="${VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-13.0}"
+VALIDATION_ROOT="${VALIDATION_ROOT:-}"
+BUNDLE_ID="moe.ouom.NeriPlayer"
+if [[ -n "$VALIDATION_ROOT" ]]; then
+  [[ "$VALIDATION_ROOT" == /* ]] || fail "VALIDATION_ROOT must be an absolute temporary data directory"
+  BUNDLE_ID="$BUNDLE_ID.validation"
+fi
 
 log() { printf '[package] %s\n' "$*"; }
 
 command -v swift >/dev/null || fail "Swift toolchain is required"
 command -v hdiutil >/dev/null || fail "hdiutil is required on macOS"
-rm -rf "$DIST_DIR"
+command -v python3 >/dev/null || fail "Python 3 is required for dependency compatibility checks"
 mkdir -p "$DIST_DIR"
 
 log "building $APP_NAME ($VERSION, build $BUILD_NUMBER)"
@@ -47,7 +59,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleDisplayName</key><string>NeriPlayer</string>
   <key>CFBundleExecutable</key><string>NeriPlayer</string>
-  <key>CFBundleIdentifier</key><string>moe.ouom.NeriPlayer</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleName</key><string>NeriPlayer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -61,6 +73,19 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   </dict></array>
 </dict></plist>
 PLIST
+
+if [[ -n "$VALIDATION_ROOT" ]]; then
+  python3 - "$APP_DIR/Contents/Info.plist" "$VALIDATION_ROOT" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as source:
+    info = plistlib.load(source)
+info['NeriPlayerValidationRoot'] = sys.argv[2]
+info['CFBundleDisplayName'] = 'NeriPlayer 验证'
+info.pop('CFBundleURLTypes', None)
+with open(sys.argv[1], 'wb') as destination:
+    plistlib.dump(info, destination)
+PY
+fi
 
 ICONSET="$DIST_DIR/AppIcon.iconset"
 if command -v iconutil >/dev/null 2>&1; then
@@ -116,6 +141,11 @@ fi
 install_name_tool -delete_rpath "$ROOT_DIR/Vendor/mpv/lib" "$EXECUTABLE_PATH" 2>/dev/null || true
 install_name_tool -add_rpath '@loader_path/../Frameworks' "$EXECUTABLE_PATH"
 
+# Fail before signing/DMG creation if the closure cannot honor the declared target.
+# `auto` is an explicit local-validation choice, never a claim of macOS 13 compatibility.
+python3 "$ROOT_DIR/Tools/check-app-compatibility.py" "$APP_DIR" \
+  --minimum "$MIN_MACOS_VERSION" --write-minimum --report "$DIST_DIR/compatibility.json"
+
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
   log "ad-hoc signing app"
   codesign --force --deep --sign - "$APP_DIR"
@@ -136,4 +166,14 @@ if [[ "$SIGNING_IDENTITY" != "-" && -n "$NOTARY_PROFILE" ]]; then
 else
   log "notarization skipped (set SIGNING_IDENTITY and NOTARY_PROFILE to enable)"
 fi
-log "created $DMG_PATH"
+# Only publish local products after all checks succeed. Existing app/DMG versions
+# are kept beside the new ones, so a failed build never destroys the last usable app.
+mkdir -p "$OUTPUT_DIR"
+for product in "$APP_DIR" "$DMG_PATH" "$DIST_DIR/compatibility.json"; do
+  destination="$OUTPUT_DIR/$(basename "$product")"
+  if [[ -e "$destination" ]]; then
+    mv "$destination" "$destination.previous-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  fi
+  mv "$product" "$destination"
+done
+log "created $OUTPUT_DIR/$(basename "$DMG_PATH")"
