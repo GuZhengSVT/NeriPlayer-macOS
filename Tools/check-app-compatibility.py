@@ -48,7 +48,7 @@ def dependencies(binary, executable, frameworks):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
-    parser.add_argument("--minimum", default="13.0", help="required deployment minimum, or auto for local validation")
+    parser.add_argument("--minimum", default="27.0", help="required deployment minimum, or auto for local validation")
     parser.add_argument("--write-minimum", action="store_true")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()

@@ -79,8 +79,8 @@ final class LibraryBrowserState: ObservableObject {
     func deactivateScrollCapture() { capturesScroll = false }
 }
 
-/// NSScrollView offsets work on the macOS 13 deployment target and preserve the actual
-/// viewport, even when no row is selected. Each dimension/detail uses a separate key.
+/// NSScrollView offsets preserve the actual viewport, even when no row is selected.
+/// Each dimension/detail uses a separate key.
 struct LibraryScrollPosition: NSViewRepresentable {
     let browser: LibraryBrowserState
     let key: String

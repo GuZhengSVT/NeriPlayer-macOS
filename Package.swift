@@ -110,7 +110,7 @@ let testTarget: Target = .testTarget(
 let package = Package(
     name: "NeriPlayer",
     platforms: [
-        .macOS(.v13),
+        .macOS("27.0"),
     ],
     products: [
         .executable(name: "NeriPlayer", targets: ["NeriPlayer"]),

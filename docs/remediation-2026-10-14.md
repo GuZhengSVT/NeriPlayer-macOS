@@ -2,7 +2,9 @@
 
 ## 1. 目标与证据边界
 
-**当前状态：2026-10-15 已完成本轮整改、统一测试和 build 5 实际界面复验。** 最新完整测试为 835 项、10 项跳过、0 失败；对应日志 `/tmp/neriplayer-remediation-tests-resumed.log`，包含最后一轮滚动捕获及标题覆盖修改。媒体库切页后滚动位置和播放页标题已在最新包通过实际操作。源码保留未提交；macOS 13 依赖重建及未执行的硬件/私有账号验收仍保留待办，详见第 6 节。
+2026-10-15 后续决定：用户明确将实际支持目标改为 macOS 27，不再要求 macOS 13。工程、打包默认值与 CI 已按该目标调整，旧系统依赖重建待办撤销；下文 macOS 13 检查结果保留为历史记录。最新上游变更与协议差异见 [上游更新与桌面移植调研](upstream-review-2026-10-15.md)。
+
+**当前状态：2026-10-15 已完成本轮整改、统一测试和 build 5 实际界面复验。** 最新完整测试为 835 项、10 项跳过、0 失败；对应日志 `/tmp/neriplayer-remediation-tests-resumed.log`，包含最后一轮滚动捕获及标题覆盖修改。媒体库切页后滚动位置和播放页标题已在最新包通过实际操作。未执行的硬件/私有账号验收仍保留待办，详见第 6 节。macOS 13 支持要求已由用户撤销，见本节后续决定。
 
 用户要求把本轮检查得到的问题和优化写成详细文档，由多个 subagent 实施，期间无需用户参与交互。
 本次依据 2026-10-14 独立阅读代码、操作现有应用和运行测试的结果；旧清单与旧验收记录只作为导航，不作为 PASS 证据。
@@ -135,7 +137,7 @@ Metal 命令队列复用，按页面/窗口可见性与系统减少动态效果�
 
 顺序：子 agent 针对性回归→主 agent 集成编译→完整 swift test→lint→release 构建→保留旧包的独立验证打包→无凭据 UI/公共音源验证。
 最终记录必须包含测试数、失败/跳过、包路径/构建号、实际二进制最低系统版本、未验证条目，以及用户原有改动是否保留。
-2026-10-14 用户要求暂停后保留全部未提交成果；恢复时依用户要求由 `gpt-6-luna` / high 三个子 agent 接手 A/B/C，主 agent 统一集成。工作包报告：[音频](remediation-audio-result.md)、[扫描与媒体键](remediation-library-result.md)、[导航与 UI](remediation-ui-result.md)。
+2026-10-14 用户要求暂停后保留全部未提交成果；恢复时依用户要求由 `gpt-6-luna` / high 三个子 agent 接手 A/B/C，主 agent 统一集成。工作包报告：[音频](history/implementation/remediation-audio-result.md)、[扫描与媒体键](history/implementation/remediation-library-result.md)、[导航与 UI](history/implementation/remediation-ui-result.md)。
 
 ### 6.1 已执行验证
 

@@ -4,7 +4,7 @@
 //
 // 选中项持久化：通过 SettingsStore 的 SettingsKeys.lastSelectedTab 保存/恢复上次选中的 tab；
 // 存储值缺失或无法识别时回落到 .home。写回放在 Binding 的 setter 里（而非 onChange），
-// 这样在 macOS 13 部署目标下不依赖 onChange(of:initial:) 的新签名，也不产生弃用警告。
+// 写回直接绑定用户选择，不需要额外 onChange 观察。
 //
 // M2-T8/M8：窗口底部挂一条跨 tab 常驻的浮动播放器，统一承载当前曲目、进度与播放控制。
 // 播放是应用级状态，切 tab 不重建会话；队列在播放栏就地展开。

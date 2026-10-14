@@ -24,7 +24,7 @@ VERSION="${VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
-MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-13.0}"
+MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-27.0}"
 VALIDATION_ROOT="${VALIDATION_ROOT:-}"
 BUNDLE_ID="moe.ouom.NeriPlayer"
 if [[ -n "$VALIDATION_ROOT" ]]; then
@@ -64,7 +64,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>27.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleURLTypes</key><array><dict>
@@ -142,7 +142,7 @@ install_name_tool -delete_rpath "$ROOT_DIR/Vendor/mpv/lib" "$EXECUTABLE_PATH" 2>
 install_name_tool -add_rpath '@loader_path/../Frameworks' "$EXECUTABLE_PATH"
 
 # Fail before signing/DMG creation if the closure cannot honor the declared target.
-# `auto` is an explicit local-validation choice, never a claim of macOS 13 compatibility.
+# `auto` is an explicit local-validation choice; normal packages target macOS 27.
 python3 "$ROOT_DIR/Tools/check-app-compatibility.py" "$APP_DIR" \
   --minimum "$MIN_MACOS_VERSION" --write-minimum --report "$DIST_DIR/compatibility.json"
 

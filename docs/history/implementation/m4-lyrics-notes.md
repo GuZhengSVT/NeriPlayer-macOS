@@ -1,7 +1,7 @@
 # M4 歌词系统 —— 移植工作笔记
 
 > 状态：M4-T1–T6 实现已落地；最终测试与人工截图验收见 `docs/acceptance/m4.md`。
-> 2026-09-30 审查补充见 [审查记录](code-review-2026-09-30.md)：修复整数溢出、XML 实体/混合内容顺序、翻译转义等；本轮补齐歌词来源、播放绑定、SwiftUI 界面、逐字高亮与 PNG 导出。
+> 2026-09-30 审查补充见 [审查记录](../reviews/code-review-2026-09-30.md)：修复整数溢出、XML 实体/混合内容顺序、翻译转义等；本轮补齐歌词来源、播放绑定、SwiftUI 界面、逐字高亮与 PNG 导出。
 > 参考实现：`/Volumes/taurus/Document/Code/NeriPlayer/np-submodule/accompanist-lyrics-core`
 > （Kotlin Multiplatform，`src/commonMain` 共约 2156 行，纯逻辑、无平台依赖，可逐文件平移）
 
@@ -115,4 +115,4 @@
 - `LyricsView.swift` / `KaraokeText.swift`：SwiftUI 滚动、原生 TextKit 字形排版与音节裁切，渲染最多补间 300ms 后等待播放器进度，不盲目累计计时。
 - `LyricsPreferencesView.swift`：字号、模糊、翻译、音译、偏移和网易云歌曲 ID。
 - `LyricsShareView.swift` / `LyricsCardExporter.swift`：选择 1–6 行、1080px 位图预览、保存和复制；资源上限防超长输入分配过大图像。
-- 测试与截图见 [M4 验收](acceptance/m4.md)。
+- 测试与截图见 [M4 验收](../acceptance/m4.md)。

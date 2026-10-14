@@ -16,7 +16,7 @@
 
 ## 格式与持久化
 
-[JSON Schema](sync-snapshot.schema.json) 由同一份 Android 字段定义生成，避免文档与 wire 编号独立演进。快照的旧字段允许缺省；已知字段类型错误会拒绝整份数据，JSON 的未知字段保留，未知 ProtoBuf tag 跳过。所有数值使用 Int64，不经 Double 中转。
+[JSON Schema](../../sync-snapshot.schema.json) 由同一份 Android 字段定义生成，避免文档与 wire 编号独立演进。快照的旧字段允许缺省；已知字段类型错误会拒绝整份数据，JSON 的未知字段保留，未知 ProtoBuf tag 跳过。所有数值使用 Int64，不经 Double 中转。
 
 上传统一使用 JSON。读取 JSON 上限 8 MiB、压缩输入 12 MiB、解压输出 16 MiB，解码嵌套深度有上限。系统 zlib 负责 GZIP 的校验和有界解压；不启动 shell 解压器。ProtoBuf 是只读兼容层，不提供 macOS 省流上传选项。
 
@@ -48,6 +48,6 @@ payload 使用 SHA-256 验证完整性（不是加密或来源认证）。恢复
 
 ## 验证边界
 
-[兼容夹具](../Tests/Fixtures/Sync/android-compatible.json) 根据 Android 当前模型和兼容测试手工构建，不是手机导出的真实文件。本地没有现成 Android backup JSON，也没有 Kotlin CLI 用来独立执行 Android serializer；真实手机导出 golden 和 GitHub/WebDAV 双端实测仍待补齐。
+[兼容夹具](../../../Tests/Fixtures/Sync/android-compatible.json) 根据 Android 当前模型和兼容测试手工构建，不是手机导出的真实文件。本地没有现成 Android backup JSON，也没有 Kotlin CLI 用来独立执行 Android serializer；真实手机导出 golden 和 GitHub/WebDAV 双端实测仍待补齐。
 
-没有使用真实令牌或创建用户云端资源。所有 HTTP 合约测试使用 URLProtocol；原生设置页用临时数据库、独立 UserDefaults suite 和内存凭据渲染。自动验证结果及截图见 [M7 验收记录](acceptance/m7.md)。
+没有使用真实令牌或创建用户云端资源。所有 HTTP 合约测试使用 URLProtocol；原生设置页用临时数据库、独立 UserDefaults suite 和内存凭据渲染。自动验证结果及截图见 [M7 验收记录](../acceptance/m7.md)。
