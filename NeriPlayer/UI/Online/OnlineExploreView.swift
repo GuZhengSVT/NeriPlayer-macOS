@@ -4,6 +4,7 @@ import AppKit
 import SwiftUI
 
 struct OnlineExploreView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @ObservedObject var viewModel: OnlineViewModel
     @ObservedObject private var favorites = CollectionFavoritesStore.shared
     var enqueueDownload: ((SongData) -> Void)?
@@ -44,7 +45,7 @@ struct OnlineExploreView: View {
             }
             if let collection = viewModel.selectedCollection { detail(collection) } else if viewModel.isSearchMode { searchContent } else { browseContent }
         }
-        .navigationTitle(showsSearch ? "搜索" : "媒体库")
+        .navigationTitle(playbackPageTitleOverride ?? (showsSearch ? "搜索" : "媒体库"))
         .task { viewModel.loadBrowseContent() }
         .sheet(isPresented: $loginPresented) { OnlineLoginView(viewModel: viewModel) }
         .sheet(isPresented: $collectionPresented) {

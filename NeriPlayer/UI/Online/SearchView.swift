@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SearchView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @EnvironmentObject private var appState: AppState
     @ObservedObject var viewModel: OnlineViewModel
     @ObservedObject var pageModel: SearchPageModel
@@ -26,16 +27,22 @@ struct SearchView: View {
                 HStack(spacing: 8) {
                     ForEach(MusicSource.allCases) { source in
                         sourceButton(source.title, selected: !pageModel.linkMode && viewModel.source == source) {
-                            pageModel.linkMode = false; pageModel.category = .songs; viewModel.songsSearchEnabled = true; viewModel.setSource(source)
+                            selectSource(source)
                         }
                     }
-                    sourceButton("链接识别", selected: pageModel.linkMode) { pageModel.linkMode = true }
+                    sourceButton("链接识别", selected: pageModel.linkMode) {
+                        guard !pageModel.linkMode else { return }
+                        pageModel.linkMode = true
+                        viewModel.songsSearchEnabled = false
+                        viewModel.search() // Cancels the song request without starting another one.
+                    }
                     Spacer(minLength: 0)
                 }
                 if !pageModel.linkMode {
                     HStack(spacing: 12) {
                         ForEach(categories) { category in
                             Button {
+                                guard pageModel.category != category else { return }
                                 pageModel.category = category
                                 viewModel.songsSearchEnabled = category == .songs
                                 viewModel.search()
@@ -70,10 +77,27 @@ struct SearchView: View {
                 songList(viewModel.results)
                 if viewModel.hasMoreResults { Button("加载更多") { viewModel.loadMore() }.disabled(viewModel.isSearching).padding(8) }
             } else { catalogContent }
-        }.navigationTitle("搜索")
+        }.navigationTitle(playbackPageTitleOverride ?? "搜索")
         .onChange(of: viewModel.source) { _ in
-            pageModel.category = .songs; viewModel.songsSearchEnabled = true; pageModel.closeArtist(); viewModel.search()
+            pageModel.resetContext()
+            pageModel.category = .songs
+            pageModel.linkMode = false
+            if !viewModel.songsSearchEnabled {
+                viewModel.songsSearchEnabled = true
+                viewModel.search()
+            } // setSource already schedules when song search is enabled.
         }
+        .onDisappear { pageModel.suspend() }
+    }
+
+    private func selectSource(_ source: MusicSource) {
+        let sourceChanged = viewModel.source != source
+        let contextChanged = pageModel.linkMode || pageModel.category != .songs
+        guard sourceChanged || contextChanged else { return }
+        pageModel.resetContext()
+        pageModel.linkMode = false; pageModel.category = .songs
+        viewModel.songsSearchEnabled = true
+        if sourceChanged { viewModel.setSource(source) } else { viewModel.search() }
     }
 
     private var categories: [CatalogCategory] {
@@ -175,6 +199,8 @@ struct SearchView: View {
         HStack { Text(message).font(.caption).foregroundStyle(.secondary); Spacer(); Button("重试", action: pageModel.linkMode ? recognize : submit) }.padding(12)
     }
     private func updateQuery(_ value: String) {
+        guard value != viewModel.query else { return }
+        pageModel.resetContext()
         viewModel.setQuery(value)
         if pageModel.category != .songs { pageModel.search(using: viewModel, debounce: true) }
     }

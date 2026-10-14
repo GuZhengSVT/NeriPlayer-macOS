@@ -239,6 +239,12 @@ final class LibraryViewModel: ObservableObject {
     @Published var selectedAlbum: AlbumGroup?
     /// 是否正在扫描/导入。
     @Published private(set) var isSyncing = false
+    /// 尚未开始的去重目录数；当前扫描目录单独列出。
+    @Published private(set) var queuedDirectoryCount = 0
+    @Published private(set) var activeScanDirectory: URL?
+    /// 当前批次的完成/失败数，队列排空后保留供反馈与检查。
+    @Published private(set) var completedScanCount = 0
+    @Published private(set) var failedScanCount = 0
     /// 是否完成过至少一次加载（避免首帧把「还没读」误显示成「库为空」）。
     @Published private(set) var hasLoaded = false
     /// 最近一次同步的结果摘要（成功时给状态条显示）。
@@ -267,6 +273,13 @@ final class LibraryViewModel: ObservableObject {
     private let playlistRepository: PlaylistRepository
     private let favoriteRepository: FavoriteRepository
     private let syncService: LibrarySyncService
+    private struct ScanRequest {
+        let directory: URL
+        var completions: [@MainActor (DirectoryScanResult) -> Void]
+    }
+    private var pendingScans: [ScanRequest] = []
+    private var activeScan: ScanRequest?
+    private var scanFailures: [String] = []
 
     /// 扫描目录记忆（M3-T5）。由 AppState 注入；为 nil 时不记录（独立使用与测试场景）。
     ///
@@ -403,14 +416,45 @@ final class LibraryViewModel: ObservableObject {
     /// 同步指定目录（与面板解耦：调用方给 URL 即可，便于将来加「最近目录」与测试驱动）。
     ///
     /// 扫描与落库是同步阻塞动作，放到 detached 任务执行；主线程只负责置状态与重新加载。
-    func importDirectory(_ directory: URL) {
-        guard !isSyncing else { return }
+    func importDirectory(
+        _ directory: URL,
+        completion: (@MainActor (DirectoryScanResult) -> Void)? = nil
+    ) {
+        let directory = directory.standardizedFileURL.resolvingSymlinksInPath()
+        // 重复请求只合并完成订阅；扫描服务的增量缓存也不会被并发访问。
+        if activeScan?.directory == directory {
+            if let completion { activeScan?.completions.append(completion) }
+            return
+        }
+        if let index = pendingScans.firstIndex(where: { $0.directory == directory }) {
+            if let completion { pendingScans[index].completions.append(completion) }
+            return
+        }
         // M3-T5：把用户导入过的目录记下来（幂等），这样设置页里能看到并重新扫描它。
         // 记录放在扫描之前：即使扫描失败，用户的选择也不该被丢掉。
         directoryStore?.add(directory)
+        if !isSyncing {
+            completedScanCount = 0
+            failedScanCount = 0
+            scanFailures = []
+            errorMessage = nil
+        }
+        pendingScans.append(ScanRequest(directory: directory, completions: completion.map { [$0] } ?? []))
+        queuedDirectoryCount = pendingScans.count
         isSyncing = true
-        errorMessage = nil
-        statusMessage = "正在扫描「\(directory.lastPathComponent)」…"
+        startNextScan()
+    }
+
+    private func startNextScan() {
+        guard activeScan == nil, !pendingScans.isEmpty else {
+            updateScanFeedback()
+            return
+        }
+        activeScan = pendingScans.removeFirst()
+        queuedDirectoryCount = pendingScans.count
+        guard let directory = activeScan?.directory else { return }
+        activeScanDirectory = directory
+        updateScanFeedback()
         let service = syncService
         Task {
             let outcome: SyncOutcome = await Task.detached(priority: .userInitiated) {
@@ -420,25 +464,46 @@ final class LibraryViewModel: ObservableObject {
                     return .failure(error.localizedDescription)
                 }
             }.value
-            isSyncing = false
-            apply(outcome)
+            finishScan(outcome, directory: directory)
         }
     }
 
     /// 把后台同步结果应用到界面状态（已在主线程）。
-    private func apply(_ outcome: SyncOutcome) {
+    private func finishScan(_ outcome: SyncOutcome, directory: URL) {
+        let scanResult: DirectoryScanResult
         switch outcome {
-        case .success(let result):
+        case .success(let syncResult):
             refresh()
-            let message = "已导入「\(result.directory.lastPathComponent)」："
-                + "新增 \(result.inserted)，更新 \(result.updated)，移除 \(result.removed)，"
-                + "库共 \(result.totalCount) 首"
-            statusMessage = message
+            completedScanCount += 1
+            let message = "已导入「\(syncResult.directory.lastPathComponent)」："
+                + "新增 \(syncResult.inserted)，更新 \(syncResult.updated)，移除 \(syncResult.removed)，"
+                + "库共 \(syncResult.totalCount) 首"
+            scanResult = .success(message)
             Log.ui.info("\(message, privacy: .public)")
         case .failure(let message):
-            statusMessage = nil
-            errorMessage = "导入失败：\(message)"
+            failedScanCount += 1
+            let failure = "「\(directory.lastPathComponent)」导入失败：\(message)"
+            scanFailures.append(failure)
+            scanResult = .failure(failure)
             Log.ui.error("导入失败：\(message, privacy: .public)")
+        }
+        let completions = activeScan?.completions ?? []
+        activeScan = nil
+        activeScanDirectory = nil
+        // 先推进队列，再发布完成回调：回调重入时仍看到准确的接收状态。
+        if pendingScans.isEmpty { isSyncing = false }
+        startNextScan()
+        for completion in completions { completion(scanResult) }
+    }
+
+    private func updateScanFeedback() {
+        // refresh() 会清错误；在每次扫描结束后还原本批次失败，避免后续成功遮住失败。
+        if !scanFailures.isEmpty { errorMessage = scanFailures.joined(separator: "\n") }
+        if let directory = activeScanDirectory {
+            statusMessage = "正在扫描「\(directory.lastPathComponent)」；等待 \(queuedDirectoryCount) 个目录；"
+                + "已完成 \(completedScanCount)，失败 \(failedScanCount)"
+        } else if !isSyncing {
+            statusMessage = "扫描结束：完成 \(completedScanCount) 个目录，失败 \(failedScanCount) 个；库共 \(tracks.count) 首"
         }
     }
 

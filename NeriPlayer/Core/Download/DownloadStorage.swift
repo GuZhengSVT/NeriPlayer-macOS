@@ -25,11 +25,8 @@ struct DownloadStorage: Sendable {
     var queueURL: URL { root.appendingPathComponent("queue.json") }
 
     static func standard() throws -> Self {
-        let manager = FileManager.default
-        let support = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let caches = try manager.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return Self(root: support.appendingPathComponent("NeriPlayer/Downloads", isDirectory: true),
-                    cacheRoot: caches.appendingPathComponent("NeriPlayer", isDirectory: true))
+        Self(root: AppRuntimePaths.applicationSupport.appendingPathComponent("Downloads", isDirectory: true),
+             cacheRoot: AppRuntimePaths.caches)
     }
 
     func prepare() throws {

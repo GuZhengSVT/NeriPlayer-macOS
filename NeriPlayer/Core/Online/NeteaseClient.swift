@@ -99,7 +99,8 @@ public actor NeteaseClient: OnlineMusicClient {
             if let resolved = item.level?.value, resolved != plan.level {
                 Log.net.info("网易云降级：\(plan.level, privacy: .public)→\(resolved, privacy: .public) \(item.type?.value ?? "", privacy: .public)")
             }
-            return ResolvedAudio(song: song, url: url, headers: Self.playbackHeaders, expiresAt: Self.expiry(for: item))
+            return ResolvedAudio(song: song, url: url, headers: Self.playbackHeaders, expiresAt: Self.expiry(for: item),
+                                 requestedQuality: preferred.rawValue, actualQuality: item.level?.value)
         }
         if let previewLevel {
             throw OnlineError.unavailable("网易云在 \(previewLevel.rawValue) 及以下档位仅返回试听片段，可能需要登录或会员权限")

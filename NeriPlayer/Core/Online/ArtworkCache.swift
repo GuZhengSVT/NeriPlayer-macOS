@@ -114,13 +114,27 @@ public final class ArtworkImageLoader: @unchecked Sendable {
 
     /// System caches directory already counted by StorageAnalyzer.artworkCache.
     public static func defaultDirectory() -> URL? {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("NeriPlayer/Artwork/Images", isDirectory: true)
+        AppRuntimePaths.caches.appendingPathComponent("Artwork/Images", isDirectory: true)
     }
 
     public func cachedImage(for url: URL?) -> NSImage? {
         guard let normalized = ArtworkURLNormalizer.normalized(url) else { return nil }
         return memory.object(forKey: ArtworkURLNormalizer.key(for: normalized) as NSString)
+    }
+
+    public func clearDiskCache() async throws {
+        memory.removeAllObjects()
+        guard let directory else { return }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            diskQueue.async {
+                do {
+                    if FileManager.default.fileExists(atPath: directory.path) {
+                        try FileManager.default.removeItem(at: directory)
+                    }
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
     }
 
     public func image(for url: URL) async throws -> NSImage {

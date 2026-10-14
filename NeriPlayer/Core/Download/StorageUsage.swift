@@ -11,6 +11,11 @@ struct StorageUsage: Sendable, Equatable {
 }
 
 struct StorageAnalyzer: Sendable {
+    static func clearArtwork(caches: URL) throws {
+        let artwork = caches.appendingPathComponent("Artwork", isDirectory: true)
+        _ = try DownloadStorage.checked(artwork, under: caches)
+        if FileManager.default.fileExists(atPath: artwork.path) { try FileManager.default.removeItem(at: artwork) }
+    }
     static func measure(downloads: URL, caches: URL) -> StorageUsage {
         let working = downloads.appendingPathComponent("Working", isDirectory: true)
         let files = downloads.appendingPathComponent("Files", isDirectory: true)

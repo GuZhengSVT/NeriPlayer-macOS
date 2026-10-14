@@ -3,7 +3,9 @@ import Foundation
 
 @MainActor
 final class SearchPageModel: ObservableObject {
-    @Published var category: CatalogCategory = .songs
+    @Published var category: CatalogCategory = .songs {
+        didSet { if category != oldValue { resetContext() } }
+    }
     @Published private(set) var items: [CatalogItem] = []
     @Published private(set) var artistTracks: [SongData] = []
     @Published private(set) var selectedArtist: CatalogItem?
@@ -11,7 +13,9 @@ final class SearchPageModel: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var hasMore = false
     @Published private(set) var history: [String]
-    @Published var linkMode = false
+    @Published var linkMode = false {
+        didSet { if linkMode != oldValue { resetContext() } }
+    }
     @Published var linkText = ""
     @Published private(set) var linkedSongs: [SongData] = []
     private let defaults: UserDefaults
@@ -64,12 +68,13 @@ final class SearchPageModel: ObservableObject {
 
     func openArtist(_ item: CatalogItem, using online: OnlineViewModel) {
         task?.cancel(); generation = UUID()
-        let token = generation
+        let token = generation, source = online.source, query = online.query
         selectedArtist = item; artistTracks = []; isLoading = true; error = nil
         task = Task { [weak self] in
             do {
                 let songs = try await online.artistSongs(item)
-                guard let self, generation == token, !Task.isCancelled else { return }
+                guard let self, generation == token, online.source == source, online.query == query,
+                      self.category == .artists, !self.linkMode, !Task.isCancelled else { return }
                 artistTracks = songs; isLoading = false
             } catch {
                 guard let self, generation == token, !Task.isCancelled else { return }
@@ -79,8 +84,18 @@ final class SearchPageModel: ObservableObject {
     }
     func closeArtist() { task?.cancel(); generation = UUID(); selectedArtist = nil; artistTracks = []; isLoading = false }
 
+    /// Every search-context transition invalidates in-flight detail/catalog/link work,
+    /// including requests whose client does not cooperate with cancellation.
+    func resetContext() {
+        closeArtist()
+        items = []; linkedSongs = []; error = nil; hasMore = false; page = 1
+    }
+
+    func suspend() { closeArtist() }
+
+
     func recognize(using online: OnlineViewModel, openCollection: @escaping (OnlineCollection) -> Void) {
-        task?.cancel(); generation = UUID(); linkedSongs = []; error = nil; isLoading = false
+        resetContext()
         guard let link = RecognizedMusicLink.parse(linkText) else {
             error = "请输入网易云歌曲/歌单/专辑、Bilibili 视频/收藏夹或 YouTube 链接；也可输入 BV/av 号。"
             return

@@ -108,6 +108,10 @@ public final class OnlineAudioTransport: @unchecked Sendable {
         let first = (lines.first ?? "").split(separator: " ")
         guard first.count == 3, ["GET", "HEAD"].contains(String(first[0])),
               let audio = configuration(String(first[1])) else { return }
+        let cachePin = await cache?.acquirePin(audio.song)
+        defer {
+            if let cachePin, let cache { Task { await cache.releasePin(cachePin) } }
+        }
         let rangeHeader = lines.first { $0.lowercased().hasPrefix("range:") }?.dropFirst(6).trimmingCharacters(in: .whitespaces)
         var start: Int64 = 0
         var requestedEnd: Int64?
@@ -159,6 +163,7 @@ public final class OnlineAudioTransport: @unchecked Sendable {
                 }
                 if first[0] != "HEAD", let cache {
                     do {
+                        try Task.checkCancellation()
                         try await cache.record(audio, start: parsed.start, total: parsed.total, data: data,
                                                mime: response.value(forHTTPHeaderField: "Content-Type"))
                     } catch { Log.net.warning("播放缓存写入失败，继续在线播放") }

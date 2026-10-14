@@ -1,9 +1,12 @@
 // DownloadsView.swift
 // M6: dense download queue with pause/resume/retry, file deletion and storage cleanup.
+import AppKit
 import SwiftUI
 
 struct DownloadsView: View {
     @ObservedObject var viewModel: DownloadViewModel
+    @EnvironmentObject private var appState: AppState
+    var navigationTitleOverride: String? = nil
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -17,6 +20,12 @@ struct DownloadsView: View {
                 Button { viewModel.clearHistory() } label: { Image(systemName: "trash") }
                     .help("清理已取消记录和临时文件")
             }.padding(12)
+            HStack(spacing: 12) {
+                Text("已下载 \(byteLabel(viewModel.usage.downloads)) · 临时文件 \(byteLabel(viewModel.usage.working))")
+                Text("播放缓存 \(byteLabel(viewModel.usage.playbackCache)) / 2 GiB · 封面 \(byteLabel(viewModel.usage.artworkCache))")
+                Spacer(minLength: 0)
+                Button("清理封面") { viewModel.clearArtworkCache() }
+            }.font(.caption).foregroundStyle(.secondary).padding([.horizontal, .bottom], 12)
             Divider()
             if viewModel.items.isEmpty {
                 VStack(spacing: 8) {
@@ -27,7 +36,8 @@ struct DownloadsView: View {
                 List(viewModel.items) { item in row(item) }.listStyle(.plain)
             }
         }
-        .navigationTitle("下载")
+        .navigationTitle(navigationTitleOverride ?? "下载")
+        .onAppear { viewModel.refreshStorage() }
         .alert("下载", isPresented: Binding(get: { viewModel.errorMessage != nil }, set: { if !$0 { viewModel.clearError() } })) {
             Button("好", role: .cancel) { viewModel.clearError() }
         } message: { Text(viewModel.errorMessage ?? "") }
@@ -56,6 +66,24 @@ struct DownloadsView: View {
     }
 
     @ViewBuilder private func controls(_ item: AudioDownload) -> some View {
+        if item.status == .completed {
+            Button {
+                Task {
+                    guard let file = await viewModel.completedFile(for: item) else { return }
+                    appState.playbackStore?.playTrack(Track(url: file, title: item.song.title,
+                        artist: item.song.artist, duration: item.song.duration))
+                }
+            } label: { Image(systemName: "play.fill") }
+                .help("播放已下载文件").accessibilityLabel("播放 \(item.song.title)")
+                .disabled(appState.playbackStore == nil)
+            Button {
+                Task {
+                    guard let file = await viewModel.completedFile(for: item) else { return }
+                    NSWorkspace.shared.activateFileViewerSelecting([file])
+                }
+            } label: { Image(systemName: "folder") }
+                .help("在 Finder 中显示").accessibilityLabel("在 Finder 中显示 \(item.song.title)")
+        }
         if item.status.isActive || item.status == .queued || item.status == .waiting {
             Button { viewModel.pause(item) } label: { Image(systemName: "pause.fill") }.help("暂停")
         } else if item.status == .paused || item.status == .failed {

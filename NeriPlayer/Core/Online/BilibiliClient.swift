@@ -130,7 +130,8 @@ public actor BilibiliClient: OnlineMusicClient {
         // 渐进式回退（durl）的容器含视频轨，但播放侧以 vid=no / vo=null 启动 mpv（MPVLaunchOption.audioOnly），
         // 只会解出音轨，因此这里直接返回它不会开窗，也不会把视频当音频播。
         return ResolvedAudio(song: resolvedSong, url: stream.url, headers: headers,
-                             expiresAt: BilibiliParsing.expiry(stream.url))
+                             expiresAt: BilibiliParsing.expiry(stream.url), requestedQuality: preferred.rawValue,
+                             actualQuality: stream.isProgressiveFallback ? nil : stream.quality.rawValue)
     }
 
     /// 取回可用于选轨的 playurl `data`。把「空音轨」当成一次独立的失败来对待：

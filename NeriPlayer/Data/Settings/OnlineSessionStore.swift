@@ -11,6 +11,22 @@ public protocol OnlineCredentialStore: Sendable {
     func remove(account: String) throws
 }
 
+/// 验证包的会话只在进程内保留，既不查询系统钥匙串，也不落盘。
+public final class VolatileCredentialStore: OnlineCredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    public init() {}
+    public func read(account: String) throws -> Data? {
+        lock.lock(); defer { lock.unlock() }; return values[account]
+    }
+    public func write(_ data: Data, account: String) throws {
+        lock.lock(); defer { lock.unlock() }; values[account] = data
+    }
+    public func remove(account: String) throws {
+        lock.lock(); defer { lock.unlock() }; values.removeValue(forKey: account)
+    }
+}
+
 public enum CredentialStoreError: LocalizedError {
     case keychain(OSStatus), invalidCookie
     public var errorDescription: String? {
@@ -58,7 +74,8 @@ public final class KeychainCredentialStore: OnlineCredentialStore, @unchecked Se
 }
 
 public final class OnlineSessionStore: @unchecked Sendable {
-    public static let shared = OnlineSessionStore()
+    public static let shared: OnlineSessionStore = AppRuntimePaths.validationRoot == nil
+        ? OnlineSessionStore() : OnlineSessionStore(credentials: VolatileCredentialStore())
     private let credentials: any OnlineCredentialStore
     private let lock = NSLock()
     private var versions: [MusicSource: UUID] = [:]

@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct HomeView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @EnvironmentObject private var appState: AppState
     @ObservedObject var onlineViewModel: OnlineViewModel
     @ObservedObject var homeViewModel: HomeViewModel
@@ -36,7 +37,7 @@ struct HomeView: View {
             .frame(maxWidth: 2000, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .navigationTitle("首页")
+        .navigationTitle(playbackPageTitleOverride ?? "首页")
         .task {
             homeViewModel.load()
             if let libraryViewModel, !libraryViewModel.hasLoaded { libraryViewModel.load() }

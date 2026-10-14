@@ -83,8 +83,24 @@ public struct ResolvedAudio: Equatable, Sendable {
     public var url: URL
     public var headers: [String: String]
     public var expiresAt: Date?
-    public init(song: SongData, url: URL, headers: [String: String] = [:], expiresAt: Date? = nil) {
+    /// Platform preference used by this resolution. Nil means unknown and cannot satisfy a quality cache lookup.
+    public var requestedQuality: String?
+    /// Platform-reported or inferred achieved tier; nil when the platform provides no reliable information.
+    public var actualQuality: String?
+    public init(song: SongData, url: URL, headers: [String: String] = [:], expiresAt: Date? = nil,
+                requestedQuality: String? = nil, actualQuality: String? = nil) {
         self.song = song; self.url = url; self.headers = headers; self.expiresAt = expiresAt
+        self.requestedQuality = requestedQuality; self.actualQuality = actualQuality
+    }
+}
+
+extension AudioQualityPreferences {
+    func cacheQuality(for source: MusicSource) -> String {
+        switch source {
+        case .netease: return netease.rawValue
+        case .bilibili: return bilibili.rawValue
+        case .youtubeMusic: return youtubeMusic.rawValue
+        }
     }
 }
 

@@ -58,9 +58,7 @@ public final class DatabaseProvider: @unchecked Sendable {
     /// 用 Application Support 而不是 Documents 的理由：这是应用自管的索引数据，
     /// 不该出现在用户可见的文档目录里，也便于 M9 打包与卸载时整目录清理。
     public static var defaultDirectoryURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("NeriPlayer", isDirectory: true)
+        AppRuntimePaths.applicationSupport
     }
 
     /// 默认库文件路径（M2-T3 任务书指定的 `Application Support/NeriPlayer/library.sqlite`）。

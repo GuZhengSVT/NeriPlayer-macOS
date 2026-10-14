@@ -110,11 +110,14 @@ public enum AudioEffectCommand: Equatable, Sendable {
 }
 
 public enum AudioEffectCommandPlan {
+    /// 优先 CoreAudio，初始化失败时允许 mpv 继续探测本机可用的其他共享输出。
+    /// 末尾逗号是 mpv 的备用输出语义，独占模式保持显式请求。
+    public static let sharedOutputDriver = "coreaudio,"
     public static func make(for settings: AudioEffectSettings) -> [AudioEffectCommand] {
         [
             .setFilter(settings.enabled ? filterString(for: settings) : nil),
             .setVolumeGain(settings.loudnessEnabled ? settings.loudnessGain : 0),
-            .setOutput(driver: settings.exclusiveOutput ? "coreaudio_exclusive" : "coreaudio", device: settings.outputDevice)
+            .setOutput(driver: settings.exclusiveOutput ? "coreaudio_exclusive" : sharedOutputDriver, device: settings.outputDevice)
         ]
     }
 

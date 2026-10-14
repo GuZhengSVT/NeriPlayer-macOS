@@ -94,24 +94,33 @@ struct PlaybackQueuePopover: View {
     private func row(index: Int, track: Track) -> some View {
         let isCurrent = queue.currentIndex == index
         return HStack(spacing: 8) {
-            // 当前曲左侧高亮条；非当前曲留同宽占位保持对齐。
-            RoundedRectangle(cornerRadius: 1)
-                .fill(isCurrent ? Color.accentColor : Color.clear)
-                .frame(width: 3, height: 22)
-            // 需求 10：有平台身份的曲目显示封面缩略图，Bilibili 走 16:9 横向容器并完整显示原图。
-            // 本地曲没有在线身份，保持原来的纯文字行，不给每一首都塞一个占位方块。
-            if let song = track.onlineSong {
-                OnlineArtworkThumbnail(url: song.artworkURL, platform: song.source, height: 30)
+            Button { onJump(index) } label: {
+                HStack(spacing: 8) {
+                    // 当前曲左侧高亮条；非当前曲留同宽占位保持对齐。
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(isCurrent ? Color.accentColor : Color.clear)
+                        .frame(width: 3, height: 22)
+                    // 需求 10：有平台身份的曲目显示封面缩略图，Bilibili 走 16:9 横向容器并完整显示原图。
+                    // 本地曲没有在线身份，保持原来的纯文字行，不给每一首都塞一个占位方块。
+                    if let song = track.onlineSong {
+                        OnlineArtworkThumbnail(url: song.artworkURL, platform: song.source, height: 30)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(track.title).lineLimit(1)
+                            .font(isCurrent ? .callout.weight(.semibold) : .callout)
+                        Text(artistText(track))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Text(PlaybackTimeText.durationText(track.duration ?? .nan))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(track.title).lineLimit(1)
-                    .font(isCurrent ? .callout.weight(.semibold) : .callout)
-                Text(artistText(track))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            Text(PlaybackTimeText.durationText(track.duration ?? .nan))
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            .accessibilityLabel("播放 \(track.title)，\(artistText(track))")
+            .accessibilityValue(isCurrent ? "当前播放" : "")
+            .help("播放此曲目（Tab 聚焦后按空格）")
             Button {
                 onRemove(index)
             } label: {
@@ -125,8 +134,6 @@ struct PlaybackQueuePopover: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        // 双击/单击都跳播：弹层里点一行就是「播这首」，与列表页的双击习惯不冲突。
-        .onTapGesture { onJump(index) }
         .background(isCurrent ? Color.accentColor.opacity(0.10) : Color.clear)
     }
 
@@ -150,7 +157,7 @@ struct PlaybackQueuePopover: View {
 
     private var footer: some View {
         HStack {
-            Text("点条目播放 · 点移除从队列删除")
+            Text("Tab 选择 · 空格播放 · 移除按钮删除")
                 .font(.caption2).foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }

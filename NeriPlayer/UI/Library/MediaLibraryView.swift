@@ -29,12 +29,21 @@ enum MediaLibraryPage: String, CaseIterable, Identifiable {
     }
 }
 
+/// Owned by MainContentView, so each window has independent local/favorite navigation.
+@MainActor
+final class MediaLibraryBrowserState: ObservableObject {
+    let local = LibraryBrowserState()
+    let favorites = LibraryBrowserState()
+    @Published var favoriteSection = 0
+}
+
 struct MediaLibraryView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @EnvironmentObject private var appState: AppState
     @ObservedObject var viewModel: LibraryViewModel
     @Binding var selection: MediaLibraryPage
     @ObservedObject private var collectionFavorites = CollectionFavoritesStore.shared
-    @State private var favoriteSection = 0
+    @ObservedObject var browser: MediaLibraryBrowserState
     /// 当前悬停的导航胶囊。悬停反馈与选中底色共用同一套视觉，只是色值更淡。
     @State private var hoveredPage: MediaLibraryPage?
 
@@ -49,7 +58,7 @@ struct MediaLibraryView: View {
             }
             Divider()
             if selection == .favorites {
-                Picker("收藏内容", selection: $favoriteSection) { Text("歌曲").tag(0); Text("歌单与专辑").tag(1) }
+                Picker("收藏内容", selection: $browser.favoriteSection) { Text("歌曲").tag(0); Text("歌单与专辑").tag(1) }
                     .pickerStyle(.segmented).frame(maxWidth: 260).padding(12)
             }
             if let source = selection.source, let online = appState.libraryOnlineModels[source] {
@@ -57,14 +66,13 @@ struct MediaLibraryView: View {
                                   addToLocalLibrary: appState.syncViewModel.map { model in
                                       { song, playlist, favorite in model.addToLibrary(song, playlistID: playlist, favorite: favorite) }
                                   }, localPlaylists: viewModel.playlists, showsSearch: false)
-            } else if selection == .favorites && favoriteSection == 1 { favoriteCollections } else {
-                LibraryView(viewModel: viewModel, favoritesPage: selection == .favorites)
+            } else if selection == .favorites && browser.favoriteSection == 1 { favoriteCollections } else {
+                LibraryView(viewModel: viewModel, favoritesPage: selection == .favorites,
+                            browser: selection == .favorites ? browser.favorites : browser.local)
                     .id(selection)
             }
         }
-        .navigationTitle("媒体库")
-        .onAppear(perform: configureLocalPage)
-        .onChange(of: selection) { _ in configureLocalPage() }
+        .navigationTitle(playbackPageTitleOverride ?? "媒体库")
     }
 
     // MARK: 导航胶囊
@@ -132,12 +140,6 @@ struct MediaLibraryView: View {
                 }.padding(20)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func configureLocalPage() {
-        guard selection.source == nil else { return }
-        viewModel.onlyFavorites = selection == .favorites
-        viewModel.localFilesOnly = selection == .local
-        viewModel.selectedArtist = nil; viewModel.selectedAlbum = nil
+            .background(LibraryScrollPosition(browser: browser.favorites, key: "collections"))
     }
 }

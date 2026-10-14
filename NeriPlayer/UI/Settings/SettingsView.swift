@@ -71,6 +71,7 @@ enum SettingsTextSize {
 }
 
 struct SettingsView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @ObservedObject var viewModel: SettingsViewModel
     var syncViewModel: SyncViewModel?
     var audioEffectsViewModel: AudioEffectsViewModel?
@@ -127,7 +128,7 @@ struct SettingsView: View {
         }
         .listStyle(.sidebar)
         .frame(minWidth: 220, idealWidth: 250, maxWidth: 320)
-        .navigationTitle("设置")
+        .navigationTitle(playbackPageTitleOverride ?? "设置")
     }
 
     /// 右侧详情。切换分类时禁用隐式动画，避免为新旧内容做交叉淡入与布局动画。
@@ -144,7 +145,7 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity)
-        .navigationTitle(selection.title)
+        .navigationTitle(playbackPageTitleOverride ?? selection.title)
         .transaction { $0.disablesAnimations = true }
     }
 

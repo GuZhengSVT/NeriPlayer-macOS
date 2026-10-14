@@ -153,7 +153,8 @@ public final class AppState: ObservableObject {
                 play: { [weak store] in store?.togglePlayPause() },
                 pause: { [weak store] in store?.togglePlayPause() },
                 next: { [weak store] in store?.next(force: true) },
-                previous: { [weak store] in store?.previous() }
+                previous: { [weak store] in store?.previous() },
+                mediaKeySource: .remoteCommandCenter
             )
             globalShortcuts?.start()
             Log.player.info("播放集成已启动：媒体键、Now Playing 与快捷键已接入")
@@ -290,8 +291,7 @@ public final class AppState: ObservableObject {
     func startOnlineSources() {
         guard onlineViewModel == nil else { return }
         let sessions = OnlineSessionStore.shared
-        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("NeriPlayer/YouTubeMusic/bootstrap.json")
+        let cache = AppRuntimePaths.caches.appendingPathComponent("YouTubeMusic/bootstrap.json")
         let clients: [any OnlineMusicClient] = [NeteaseClient(sessions: sessions), BilibiliClient(sessions: sessions),
                                                 YouTubeMusicClient(sessionStore: sessions, cacheURL: cache)]
         let manager = OnlineSearchManager(clients: clients)
@@ -399,6 +399,8 @@ public final class AppState: ObservableObject {
     func startSync() {
         guard !isSafeMode, syncViewModel == nil, let database = libraryDatabase else { return }
         syncViewModel = SyncViewModel(database: database, settings: settings,
+            configurationStore: AppRuntimePaths.validationRoot == nil ? nil
+                : SyncConfigurationStore(settings: settings, credentials: VolatileCredentialStore()),
             beforeCapture: { [weak self] in self?.playbackStats?.flush() },
             beforeRestore: { [weak self] in
                 self?.sessionRecorder?.flushNow(reason: "备份恢复前")
@@ -430,6 +432,12 @@ public final class AppState: ObservableObject {
             settings: settings,
             rescanHandler: { [weak self] url in
                 self?.libraryViewModel?.importDirectory(url)
+            },
+            rescanWithCompletionHandler: { [weak self] url, completion in
+                guard let library = self?.libraryViewModel else {
+                    completion(.failure("媒体库尚未就绪")); return
+                }
+                library.importDirectory(url, completion: completion)
             }
         )
         settingsViewModel = viewModel

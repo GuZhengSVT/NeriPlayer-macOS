@@ -14,6 +14,8 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
     private let resolver: PlaybackResolver
     private let searchManager: OnlineSearchManager
     private let cache: PlaybackAudioCache?
+    private let qualityProvider: AudioQualityProvider
+    private var cachePin: UUID?
     private var task: Task<Void, Never>?
     private var token: UUID?
     private var track: Track?
@@ -26,8 +28,9 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
     private var observation: Task<Void, Never>?
 
     init(store: PlaybackStateStore, resolver: PlaybackResolver, searchManager: OnlineSearchManager,
-         cache: PlaybackAudioCache? = nil) {
+         cache: PlaybackAudioCache? = nil, quality: AudioQualityProvider = .settings) {
         self.store = store; self.resolver = resolver; self.searchManager = searchManager; self.cache = cache
+        self.qualityProvider = quality
         store.setOnlineHandlers(load: { [weak self] track, token, paused in
             Task { @MainActor [weak self] in self?.begin(track, token: token, paused: paused) }
         }, failure: { [weak self] track, token, message in
@@ -41,20 +44,23 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
                 let stale = token.flatMap { request in self.track.map { !store.isCurrentOnlineRequest(request, trackID: $0.id) } } ?? false
                 if snapshot.currentTrack?.onlineSong == nil || stale {
                     task?.cancel(); token = nil
-                    if let currentSong { Task { await cache?.unpin(currentSong) } }
+                    releaseCachePin()
                     currentSong = nil; currentResolvedAudio = nil; phase = .idle
                 }
             }
         }
     }
-    deinit { task?.cancel(); observation?.cancel() }
+    deinit {
+        task?.cancel(); observation?.cancel()
+        if let cachePin, let cache { Task { await cache.releasePin(cachePin) } }
+    }
     public func play(_ song: SongData) { store.playTrack(song.track()) }
     public func setQueue(_ songs: [SongData], startIndex: Int = 0) { store.setQueue(songs.map { $0.track() }, startIndex: startIndex) }
     public func enqueueNext(_ song: SongData) { store.enqueueNext(song.track()) }
 
     private func begin(_ track: Track, token: UUID, paused: Bool) {
         guard let song = track.onlineSong, store.isCurrentOnlineRequest(token, trackID: track.id) else { return }
-        if let previous = currentSong, previous.id != song.id { Task { await cache?.unpin(previous) } }
+        releaseCachePin()
         task?.cancel()
         self.track = track; self.token = token; self.paused = paused
         excluded = []; refreshed = []; alternatives = []; failureInFlight = false
@@ -94,14 +100,14 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
         }
         return valid(token)
     }
-    private func resolveCurrent(_ song: SongData, token: UUID) async {
+    private func resolveCurrent(_ song: SongData, token: UUID, resumePosition: Double? = nil) async {
         do {
             // Try the original source before making cross-platform searches.
-            var outcome = try await attempt(song, token: token)
+            var outcome = try await attempt(song, token: token, resumePosition: resumePosition)
             while case .skipped(_, let attempts) = outcome, valid(token) {
                 excluded.formUnion(attempts.map(\.songID))
                 guard await discover(song, token: token) else { break }
-                outcome = try await attempt(song, token: token)
+                outcome = try await attempt(song, token: token, resumePosition: resumePosition)
             }
             guard valid(token) else { return }
             switch outcome {
@@ -114,20 +120,63 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
             store.skipFailedOnlineTrack(track?.id ?? UUID())
         }
     }
-    private func attempt(_ song: SongData, token: UUID) async throws -> PlaybackResolutionOutcome {
-        let store = self.store
+    private func attempt(_ song: SongData, token: UUID, resumePosition: Double?) async throws -> PlaybackResolutionOutcome {
         guard let track else { throw CancellationError() }
-        let paused = self.paused
-        if let cache, let cachedURL = try? await cache.lookup(song) {
-            await cache.pin(song)
-            if try store.loadCachedAudio(cachedURL, for: track, requestID: token, paused: paused) {
-                return .resolved(ResolvedAudio(song: song, url: cachedURL), attempts: [])
+        var attempts: [PlaybackResolutionAttempt] = []
+        // Preserve resolver order: the original source gets its cache/resolve attempt before alternatives.
+        for candidate in resolver.candidates(for: song, from: alternatives, excluding: excluded) {
+            guard valid(token) else { throw CancellationError() }
+            if let cache {
+                let pin = await cache.acquirePin(candidate.song)
+                do {
+                    let quality = qualityProvider.preferences().cacheQuality(for: candidate.song.source)
+                    if let cached = try await cache.lookupAudio(candidate.song, quality: quality) {
+                        guard valid(token) else { throw CancellationError() }
+                        let loadPaused = resumePosition == nil ? paused : store.isPaused
+                        if try store.loadCachedAudio(cached.url, for: track, requestID: token, paused: loadPaused,
+                                                     resumePosition: resumePosition) {
+                            replaceCachePin(pin)
+                            return .resolved(cached, attempts: attempts)
+                        }
+                        throw CancellationError()
+                    }
+                } catch {
+                    await cache.releasePin(pin)
+                    if error is CancellationError || !valid(token) { throw CancellationError() }
+                    // A corrupt/unreadable cache falls through to the network candidate.
+                }
+                await cache.releasePin(pin)
+            }
+            let outcome = try await resolver.resolveAndLoad(candidate.song, alreadyRefreshed: refreshed) { [weak self] audio in
+                guard let self else { throw CancellationError() }
+                try await self.loadAudio(audio, for: track, token: token, resumePosition: resumePosition)
+            }
+            switch outcome {
+            case .resolved(let audio, let candidateAttempts): return .resolved(audio, attempts: attempts + candidateAttempts)
+            case .skipped(_, let candidateAttempts): attempts += candidateAttempts
             }
         }
-        return try await resolver.resolveAndLoad(song, candidates: alternatives, excluding: excluded, alreadyRefreshed: refreshed) { audio in
-            try Task.checkCancellation()
-            guard try store.loadResolvedAudio(audio, for: track, requestID: token, paused: paused) else { throw CancellationError() }
+        return .skipped(song: song, attempts: attempts)
+    }
+    private func loadAudio(_ audio: ResolvedAudio, for track: Track, token: UUID, resumePosition: Double?) async throws {
+        let pin = await cache?.acquirePin(audio.song)
+        do {
+            guard valid(token) else { throw CancellationError() }
+            let loadPaused = resumePosition == nil ? paused : store.isPaused
+            guard try store.loadResolvedAudio(audio, for: track, requestID: token, paused: loadPaused,
+                                              resumePosition: resumePosition) else { throw CancellationError() }
+            replaceCachePin(pin)
+        } catch {
+            if let pin { await cache?.releasePin(pin) }
+            throw error
         }
+    }
+    private func replaceCachePin(_ pin: UUID?) {
+        releaseCachePin(); cachePin = pin
+    }
+    private func releaseCachePin() {
+        if let pin = cachePin { Task { await cache?.releasePin(pin) } }
+        cachePin = nil
     }
     private func failed(_ track: Track, token: UUID, message: String) {
         guard valid(token), !failureInFlight, let audio = currentResolvedAudio, let song = track.onlineSong else { return }
@@ -140,22 +189,23 @@ public final class OnlinePlaybackCoordinator: ObservableObject {
             if refreshed.insert(audio.song.id).inserted {
                 do {
                     if let refreshedAudio = try await resolver.refresh(audio), valid(token) {
-                        if try store.loadResolvedAudio(refreshedAudio, for: track, requestID: token, paused: paused, resumePosition: resumePosition) {
-                            currentResolvedAudio = refreshedAudio; phase = .playing; failureInFlight = false
-                            return
-                        }
+                        try await loadAudio(refreshedAudio, for: track, token: token, resumePosition: resumePosition)
+                        guard valid(token) else { return }
+                        currentResolvedAudio = refreshedAudio; phase = .playing; failureInFlight = false
+                        return
                     }
                 } catch { if !valid(token) { return } }
             }
             excluded.insert(audio.song.id)
-            await resolveCurrent(song, token: token)
+            guard valid(token) else { return }
+            await resolveCurrent(song, token: token, resumePosition: resumePosition)
         }
     }
     public func stop() {
         task?.cancel(); task = nil; token = nil
         observation?.cancel(); observation = nil
         store.setOnlineHandlers(load: nil, failure: nil)
-        if let currentSong { Task { await cache?.unpin(currentSong) } }
+        releaseCachePin()
         currentSong = nil; currentResolvedAudio = nil; phase = .idle
     }
 }

@@ -9,19 +9,21 @@ final class DownloadViewModel: ObservableObject {
     @Published private(set) var storageBytes: Int64 = 0
     @Published private(set) var cacheBytes: Int64 = 0
     @Published private(set) var errorMessage: String?
+    @Published private(set) var usage = StorageUsage()
     private let manager: DownloadManager
     private let cache: PlaybackAudioCache?
     private let storage: DownloadStorage
     private var observation: Task<Void, Never>?
+    private var storageRefresh: Task<Void, Never>?
+    private var storageDirty = false
 
     init(manager: DownloadManager, storage: DownloadStorage, cache: PlaybackAudioCache? = nil) {
         self.manager = manager
         self.storage = storage
         self.cache = cache
         observation = Task { [weak self] in
-            guard let self else { return }
             for await items in await manager.observe() {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.items = items
                 self.refreshStorage(storage)
             }
@@ -29,7 +31,7 @@ final class DownloadViewModel: ObservableObject {
         Task { await manager.start() }
     }
 
-    deinit { observation?.cancel() }
+    deinit { observation?.cancel(); storageRefresh?.cancel() }
 
     func enqueue(_ song: SongData) { enqueue([song]) }
     func enqueue(_ songs: [SongData]) {
@@ -54,6 +56,30 @@ final class DownloadViewModel: ObservableObject {
     }
     func clearError() { errorMessage = nil }
 
+    /// 下载 actor 检查文件归属、长度和摘要，界面不自行拼接或信任外来路径。
+    func completedFile(for item: AudioDownload) async -> URL? {
+        do {
+            guard item.status == .completed, let file = try await manager.file(for: item.id) else {
+                errorMessage = "下载文件尚未完成或已不存在。"; return nil
+            }
+            return file
+        } catch { errorMessage = error.localizedDescription; return nil }
+    }
+
+    func refreshStorage() { refreshStorage(storage) }
+
+    func clearArtworkCache() {
+        Task { [weak self] in
+            do {
+                try await ArtworkImageLoader.shared.clearDiskCache()
+                if let self {
+                    try StorageAnalyzer.clearArtwork(caches: storage.cacheRoot)
+                    refreshStorage()
+                }
+            } catch { self?.errorMessage = error.localizedDescription }
+        }
+    }
+
     private func mutate(_ operation: @escaping () async throws -> Void) {
         Task { [weak self] in
             do { try await operation() } catch { self?.errorMessage = error.localizedDescription }
@@ -61,27 +87,23 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func refreshStorage(_ storage: DownloadStorage) {
-        let root = storage.root
-        let cache = storage.cacheRoot
-        Task.detached(priority: .utility) {
-            let values = Self.directorySize(root)
-            let cacheValues = Self.directorySize(cache)
-            await MainActor.run { [weak self] in
-                self?.storageBytes = values
-                self?.cacheBytes = cacheValues
+        storageDirty = true
+        guard storageRefresh == nil else { return }
+        // 至多一个目录遍历在途；进度高频更新合并为每秒一次，完成事件仍有最终更新。
+        storageRefresh = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self else { return }
+                storageDirty = false
+                let values = await Task.detached(priority: .utility) {
+                    StorageAnalyzer.measure(downloads: storage.root, caches: storage.cacheRoot)
+                }.value
+                guard !Task.isCancelled else { return }
+                usage = values
+                storageBytes = values.downloads + values.working
+                cacheBytes = values.playbackCache + values.artworkCache
+                if !storageDirty { storageRefresh = nil; return }
             }
-        }
-    }
-
-    nonisolated private static func directorySize(_ url: URL) -> Int64 {
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else {
-            return 0
-        }
-        return enumerator.reduce(into: Int64(0)) { result, element in
-            guard let file = element as? URL,
-                  let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true else { return }
-            result += Int64(values.fileSize ?? 0)
         }
     }
 }

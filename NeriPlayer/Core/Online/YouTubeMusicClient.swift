@@ -69,7 +69,8 @@ public actor YouTubeMusicClient: OnlineMusicClient {
                 }
                 let expires = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
                     .first { $0.name == "expire" }?.value.flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
-                return ResolvedAudio(song: song, url: url, headers: ["User-Agent": userAgent, "Range": "bytes=0-"], expiresAt: expires)
+                return ResolvedAudio(song: song, url: url, headers: ["User-Agent": userAgent, "Range": "bytes=0-"], expiresAt: expires,
+                                     requestedQuality: preferred.rawValue, actualQuality: achieved.rawValue)
             }
         }
         throw OnlineError.unavailable("YouTube Music 音源需要尚未支持的挑战或已不可用")

@@ -132,7 +132,8 @@ final class OnlinePlaybackTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let cache = try PlaybackAudioCache(root: directory)
         let cached = URL(string: "https://cdn.example/audio?expire=1&sig=old")!
-        let audio = ResolvedAudio(song: song, url: cached)
+        let audio = ResolvedAudio(song: song, url: cached,
+                                  requestedQuality: AudioQualityPreferences(settings: .shared).netease.rawValue)
         try await cache.record(audio, start: 0, total: 8, data: Data("abcdefgh".utf8), mime: "audio/mpeg")
         let engine = OnlineTestEngine(); let store = PlaybackStateStore(engine: engine)
         let client = OnlineFixtureClient(source: .netease, fails: true)

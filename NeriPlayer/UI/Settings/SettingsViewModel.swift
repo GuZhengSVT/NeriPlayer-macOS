@@ -15,6 +15,12 @@
 import Foundation
 import SwiftUI
 
+/// 接收层真正完成扫描后返回；提交请求本身不能被表述成扫描完成。
+public enum DirectoryScanResult: Equatable, Sendable {
+    case success(String)
+    case failure(String)
+}
+
 /// 设置页视图模型。钉在 MainActor 上：@Published 的写入与视图读取都只在主线程。
 @MainActor
 public final class SettingsViewModel: ObservableObject {
@@ -71,15 +77,29 @@ public final class SettingsViewModel: ObservableObject {
     /// 标 @MainActor：注入的实现要调用 LibraryViewModel（MainActor）的导入入口，
     /// 声明成主线程隔离的闭包，调用点就不需要再自己跳线程，也不会误在后台线程碰界面状态。
     private let rescanHandler: @MainActor (URL) -> Void
+    private let rescanWithCompletionHandler:
+        (@MainActor (URL, @escaping @MainActor (DirectoryScanResult) -> Void) -> Void)?
+    private struct ScanFeedback {
+        let id: UUID
+        let total: Int
+        let unavailable: [String]
+        var pending: Set<Int>
+        var completed = 0
+        var failures: [String] = []
+    }
+    private var scanFeedback: ScanFeedback?
 
     public init(
         settings: SettingsStore = .shared,
         directoryStore: LibraryDirectoryStore? = nil,
-        rescanHandler: @escaping @MainActor (URL) -> Void = { _ in }
+        rescanHandler: @escaping @MainActor (URL) -> Void = { _ in },
+        rescanWithCompletionHandler:
+            (@MainActor (URL, @escaping @MainActor (DirectoryScanResult) -> Void) -> Void)? = nil
     ) {
         self.settings = settings
         self.directoryStore = directoryStore ?? LibraryDirectoryStore(settings: settings)
         self.rescanHandler = rescanHandler
+        self.rescanWithCompletionHandler = rescanWithCompletionHandler
         self.appearance = AppearanceMode(storedValue: settings.value(for: SettingsKeys.appAppearance))
         self.accent = AccentColorOption(storedValue: settings.value(for: SettingsKeys.accentColor))
         self.resumePlaybackOnLaunch = settings.value(for: SettingsKeys.resumePlaybackOnLaunch)
@@ -367,7 +387,7 @@ public final class SettingsViewModel: ObservableObject {
             : "已加入媒体库目录：\(directory.displayName)"
         // 加入即同步一次，用户不必再去媒体库 tab 手动导入。
         if !alreadyPresent, let resolved = directoryStore.resolve(directory) {
-            rescanHandler(resolved)
+            submitScans([resolved], unavailable: [])
         }
     }
 
@@ -389,24 +409,67 @@ public final class SettingsViewModel: ObservableObject {
             return
         }
         var missing: [String] = []
-        var scanned = 0
+        var urls: [URL] = []
         for directory in directories {
             guard let url = directoryStore.resolve(directory) else {
                 missing.append(directory.displayName)
                 continue
             }
-            rescanHandler(url)
-            scanned += 1
+            urls.append(url)
         }
-        if missing.isEmpty {
-            statusMessage = "正在重新扫描 \(scanned) 个目录…"
+        submitScans(urls, unavailable: missing)
+    }
+
+    private func submitScans(_ urls: [URL], unavailable: [String]) {
+        let id = UUID()
+        scanFeedback = ScanFeedback(id: id, total: urls.count, unavailable: unavailable,
+                                    pending: Set(urls.indices))
+        if let rescanWithCompletionHandler {
+            updateScanFeedback()
+            for (index, url) in urls.enumerated() {
+                rescanWithCompletionHandler(url) { [weak self] result in
+                    guard let self, var feedback = self.scanFeedback, feedback.id == id,
+                          feedback.pending.remove(index) != nil else { return }
+                    switch result {
+                    case .success: feedback.completed += 1
+                    case .failure(let message): feedback.failures.append(message)
+                    }
+                    self.scanFeedback = feedback
+                    self.updateScanFeedback()
+                }
+            }
         } else {
-            statusMessage = "正在重新扫描 \(scanned) 个目录；\(missing.joined(separator: "、")) 当前不可用"
+            // 兼容只有提交能力的调用方：明确是请求已提交，不推测其后台完成情况。
+            for url in urls { rescanHandler(url) }
+            statusMessage = urls.isEmpty ? "未提交扫描请求" : "已提交重新扫描 \(urls.count) 个目录"
+            appendUnavailable(unavailable)
         }
+    }
+
+    private func updateScanFeedback() {
+        guard let feedback = scanFeedback else { return }
+        if feedback.total == 0 {
+            statusMessage = "未提交扫描请求"
+        } else if feedback.pending.isEmpty {
+            statusMessage = "扫描结束：完成 \(feedback.completed) 个目录，失败 \(feedback.failures.count) 个"
+        } else {
+            statusMessage = "已提交重新扫描 \(feedback.total) 个目录；已完成 \(feedback.completed)，"
+                + "失败 \(feedback.failures.count)，等待 \(feedback.pending.count) 个"
+        }
+        if !feedback.failures.isEmpty {
+            statusMessage = (statusMessage ?? "") + "；" + feedback.failures.joined(separator: "；")
+        }
+        appendUnavailable(feedback.unavailable)
+    }
+
+    private func appendUnavailable(_ names: [String]) {
+        guard !names.isEmpty else { return }
+        statusMessage = (statusMessage ?? "") + "；\(names.joined(separator: "、")) 当前不可用"
     }
 
     /// 清空状态提示（视图在展示后调用）。
     public func clearStatusMessage() {
+        scanFeedback = nil
         statusMessage = nil
     }
 

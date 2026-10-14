@@ -198,13 +198,7 @@ public final class CrashReporter {
 
     /// Application Support/NeriPlayer/crash。
     static func defaultDirectory() -> URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("NeriPlayer", isDirectory: true)
-            .appendingPathComponent("crash", isDirectory: true)
+        AppRuntimePaths.applicationSupport.appendingPathComponent("crash", isDirectory: true)
     }
 
     /// 从统一版本契约读取版本，保证 SwiftPM 与打包应用的诊断一致。

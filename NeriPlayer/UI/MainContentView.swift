@@ -20,6 +20,17 @@
 
 import SwiftUI
 
+private struct PlaybackPageTitleOverrideKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    var playbackPageTitleOverride: String? {
+        get { self[PlaybackPageTitleOverrideKey.self] }
+        set { self[PlaybackPageTitleOverrideKey.self] = newValue }
+    }
+}
+
 // MARK: - 导航项
 
 /// 顶层导航项。rawValue 即持久化到 SettingsKeys.lastSelectedTab 的标识。
@@ -73,6 +84,7 @@ struct MainContentView: View {
     @State private var showingNowPlaying = false
     @State private var libraryPage: MediaLibraryPage = .local
     @StateObject private var searchPageModel = SearchPageModel()
+    @StateObject private var libraryBrowser = MediaLibraryBrowserState()
 
     /// 构造时即读出上次选中的 tab，避免首帧先显示 home 再跳转。
     init(store: SettingsStore = .shared) {
@@ -93,6 +105,7 @@ struct MainContentView: View {
             } detail: {
                 detail
             }
+            .navigationTitle(showingNowPlaying ? "正在播放" : selection.title)
             if let coordinator = appState.onlinePlayback { OnlinePlaybackStatusView(coordinator: coordinator) }
             FloatingPlayerBar(onOpenNowPlaying: { showingNowPlaying = true })
         }
@@ -117,8 +130,11 @@ struct MainContentView: View {
             navigationDetail
                 .opacity(showingNowPlaying ? 0 : 1)
                 .allowsHitTesting(!showingNowPlaying)
+                .environment(\.playbackPageTitleOverride, showingNowPlaying ? "正在播放" : nil)
+                .navigationTitle(showingNowPlaying ? "正在播放" : selection.title)
             if showingNowPlaying {
                 NowPlayingPage(onBack: { showingNowPlaying = false })
+                    .navigationTitle("正在播放")
             }
         }
     }
@@ -133,11 +149,12 @@ struct MainContentView: View {
                      onDownloads: { selectionBinding.wrappedValue = .downloads },
                      onOpenCollection: openCollection)
         } else if selection == .library, let viewModel = appState.libraryViewModel {
-            MediaLibraryView(viewModel: viewModel, selection: $libraryPage)
+            MediaLibraryView(viewModel: viewModel, selection: $libraryPage, browser: libraryBrowser)
         } else if selection == .explore, let model = appState.onlineViewModel {
             SearchView(viewModel: model, pageModel: searchPageModel, onOpenCollection: openCollection)
         } else if selection == .downloads, let downloads = appState.downloadViewModel {
-            DownloadsView(viewModel: downloads)
+            DownloadsView(viewModel: downloads,
+                          navigationTitleOverride: showingNowPlaying ? "正在播放" : nil)
         } else if selection == .settings, let settingsViewModel = appState.settingsViewModel {
             SettingsView(viewModel: settingsViewModel, syncViewModel: appState.syncViewModel,
                          audioEffectsViewModel: appState.audioEffectsViewModel,
@@ -167,7 +184,7 @@ struct MainContentView: View {
             }
         }
         .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 280)
-        .navigationTitle(AppInfo.displayName)
+        .navigationTitle(showingNowPlaying ? "正在播放" : AppInfo.displayName)
     }
 
     /// 选中项读写：更新 @State 的同时把 tab 标识写入设置存储。
@@ -178,6 +195,10 @@ struct MainContentView: View {
             get: { selection },
             set: { newValue in
                 showingNowPlaying = false
+                if selection == .library, newValue != .library {
+                    libraryBrowser.local.deactivateScrollCapture()
+                    libraryBrowser.favorites.deactivateScrollCapture()
+                }
                 selection = newValue
                 store.set(newValue.rawValue, for: SettingsKeys.lastSelectedTab)
             }
@@ -196,6 +217,7 @@ struct MainContentView: View {
 /// 占位详情视图：显示当前 tab 的名称与图标；安全模式下在顶部给出提示条。
 /// 各 tab 的真实内容由后续里程碑任务替换。
 struct PlaceholderDetailView: View {
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     let tab: MainTab
     let isSafeMode: Bool
 
@@ -216,7 +238,7 @@ struct PlaceholderDetailView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle(tab.title)
+        .navigationTitle(playbackPageTitleOverride ?? tab.title)
     }
 
     /// 安全模式提示条。保持 M0-T4 的降级提示可见。

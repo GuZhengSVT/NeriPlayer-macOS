@@ -173,11 +173,11 @@ struct FloatingPlayerBar: View {
                                 .font(typography.uiFont(size: 13))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                            Text(sourceAndSpecText(snapshot))
+                            PlaybackSourceAndSpecLabel(track: track, audioInfo: snapshot?.audioTrackInfo,
+                                                       coordinator: appState.onlinePlayback)
                                 .font(typography.uiFont(size: 13))
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
-                                .help(sourceAndSpecText(snapshot))
                         }
                     }
                 }
@@ -200,17 +200,6 @@ struct FloatingPlayerBar: View {
             return "未知歌手"
         }
         return artist
-    }
-
-    /// 歌曲数据行（不含歌手）：平台来源 + 真实音频规格，用 " · " 连接。
-    ///
-    /// 来源只在在线曲出现（本地曲没有平台）；规格只列内核实际报告过的字段，缺一项就不显示那一项，
-    /// 全缺时给一个明确占位而不是空白。
-    private func sourceAndSpecText(_ snapshot: PlaybackSnapshot?) -> String {
-        let source = snapshot?.currentTrack?.onlineSong?.source.title
-        let spec = AudioInfoText.summary(snapshot?.audioTrackInfo)
-        let parts = [source, spec].compactMap { $0 }
-        return parts.isEmpty ? "音频信息待加载" : parts.joined(separator: " · ")
     }
 
     // MARK: - 中区：进度行 + 传输组
@@ -784,5 +773,53 @@ private struct NewCurrentTrackPlaylistSheet: View {
         guard !trimmedName.isEmpty else { return }
         onConfirm(trimmedName)
         dismiss()
+    }
+}
+
+
+/// Shared source semantics for the bar and the playback page. The queue's identity
+/// remains the original song; only the coordinator knows the resolved playback source.
+enum PlaybackSourceText {
+    static func text(original: MusicSource?, resolved: MusicSource?) -> String? {
+        guard let original else { return nil }
+        guard let resolved else { return "原曲：\(original.title) · 播放来源待解析" }
+        if original == resolved { return "播放：\(resolved.title)" }
+        return "原曲：\(original.title) · 播放：\(resolved.title)"
+    }
+}
+
+struct PlaybackSourceAndSpecLabel: View {
+    let track: Track?
+    let audioInfo: AudioTrackInfo?
+    let coordinator: OnlinePlaybackCoordinator?
+
+    var body: some View {
+        if let coordinator {
+            ResolvedPlaybackSourceLabel(track: track, audioInfo: audioInfo, coordinator: coordinator)
+        } else {
+            Text(Self.summary(track: track, audioInfo: audioInfo, resolved: nil))
+                .help(Self.summary(track: track, audioInfo: audioInfo, resolved: nil))
+        }
+    }
+
+    static func summary(track: Track?, audioInfo: AudioTrackInfo?, resolved: MusicSource?) -> String {
+        let parts = [PlaybackSourceText.text(original: track?.onlineSong?.source, resolved: resolved),
+                     AudioInfoText.summary(audioInfo)].compactMap { $0 }
+        return parts.isEmpty ? "音频信息待加载" : parts.joined(separator: " · ")
+    }
+}
+
+private struct ResolvedPlaybackSourceLabel: View {
+    let track: Track?
+    let audioInfo: AudioTrackInfo?
+    @ObservedObject var coordinator: OnlinePlaybackCoordinator
+
+    var body: some View {
+        // A fast queue transition can publish before the coordinator begins resolving.
+        // Matching the original song prevents the previous track's source from leaking.
+        let resolved = coordinator.currentSong?.id == track?.onlineSong?.id && coordinator.phase == .playing
+            ? coordinator.currentResolvedAudio?.song.source : nil
+        let text = PlaybackSourceAndSpecLabel.summary(track: track, audioInfo: audioInfo, resolved: resolved)
+        Text(text).help(text).accessibilityLabel(text)
     }
 }

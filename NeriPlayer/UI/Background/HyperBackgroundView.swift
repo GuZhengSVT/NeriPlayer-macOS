@@ -6,32 +6,45 @@ import SwiftUI
 struct HyperBackgroundView: NSViewRepresentable {
     var dark: Bool
     var colors: [SIMD4<Float>]?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    private var effectiveDark: Bool { dark || colorScheme == .dark }
 
-    func makeCoordinator() -> Coordinator { Coordinator(dark: dark, colors: colors ?? (dark ? BgEffectPainter.darkColors : BgEffectPainter.defaultColors)) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(dark: effectiveDark, colors: colors ?? (effectiveDark ? BgEffectPainter.darkColors : BgEffectPainter.defaultColors))
+    }
     func makeNSView(context: Context) -> MTKView {
-        let view = MTKView()
+        let view = BackgroundMetalView()
+        view.onVisibilityChange = { [weak coordinator = context.coordinator] in coordinator?.updateDrawing() }
+        context.coordinator.reduceMotion = reduceMotion
         context.coordinator.configure(view)
         return view
     }
     func updateNSView(_ nsView: MTKView, context: Context) {
-        context.coordinator.dark = dark
-        context.coordinator.colors = colors ?? (dark ? BgEffectPainter.darkColors : BgEffectPainter.defaultColors)
+        context.coordinator.dark = effectiveDark
+        context.coordinator.colors = colors ?? (effectiveDark ? BgEffectPainter.darkColors : BgEffectPainter.defaultColors)
+        context.coordinator.reduceMotion = reduceMotion
+        context.coordinator.updateDrawing()
+        nsView.needsDisplay = true
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
         var dark: Bool
         var colors: [SIMD4<Float>]
         private var device: MTLDevice?
+        private var commandQueue: MTLCommandQueue?
         private var pipeline: MTLRenderPipelineState?
         private var start = CACurrentMediaTime()
-        private var view: MTKView?
+        private weak var view: MTKView?
+        var reduceMotion = false
 
         init(dark: Bool, colors: [SIMD4<Float>]) { self.dark = dark; self.colors = colors }
         func configure(_ view: MTKView) {
             self.view = view
             guard let device = MTLCreateSystemDefaultDevice() else { view.isHidden = true; return }
             self.device = device; view.device = device; view.delegate = self
-            view.isPaused = false; view.enableSetNeedsDisplay = false; view.preferredFramesPerSecond = 60
+            commandQueue = device.makeCommandQueue()
+            view.preferredFramesPerSecond = 30
             view.framebufferOnly = true; view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
             guard let url = Bundle.module.url(forResource: "HyperBackground", withExtension: "metal"),
                   let source = try? String(contentsOf: url),
@@ -42,17 +55,50 @@ struct HyperBackgroundView: NSViewRepresentable {
             descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
             pipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
             start = CACurrentMediaTime()
+            updateDrawing()
+        }
+        func updateDrawing() {
+            guard let view else { return }
+            let visible = view.window?.occlusionState.contains(.visible) == true && !NSApplication.shared.isHidden
+            view.isPaused = reduceMotion || !visible
+            view.enableSetNeedsDisplay = view.isPaused
         }
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
         func draw(in view: MTKView) {
-            guard let pipeline, let commandBuffer = view.currentDrawable.flatMap({ _ in device?.makeCommandQueue()?.makeCommandBuffer() }),
+            guard let pipeline, let drawable = view.currentDrawable, let commandBuffer = commandQueue?.makeCommandBuffer(),
                   let pass = view.currentRenderPassDescriptor, let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
             var uniforms = BgEffectPainter.uniforms(size: view.drawableSize, time: Float(CACurrentMediaTime() - start), dark: dark, colors: colors)
             encoder.setRenderPipelineState(pipeline); encoder.setVertexBytes(&uniforms, length: MemoryLayout<BgEffectUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3); encoder.endEncoding()
-            if let drawable = view.currentDrawable { commandBuffer.present(drawable) }; commandBuffer.commit()
+            commandBuffer.present(drawable); commandBuffer.commit()
         }
     }
+}
+
+private final class BackgroundMetalView: MTKView {
+    var onVisibilityChange: (() -> Void)?
+    private var observations: [NSObjectProtocol] = []
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observations.forEach(NotificationCenter.default.removeObserver)
+        observations = []
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification] {
+                observations.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.onVisibilityChange?()
+                })
+            }
+            for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+                observations.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    self?.onVisibilityChange?()
+                })
+            }
+        }
+        onVisibilityChange?()
+    }
+    deinit { observations.forEach(NotificationCenter.default.removeObserver) }
 }
 
 struct BgEffectFiveVectors {

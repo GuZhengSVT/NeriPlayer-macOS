@@ -274,13 +274,17 @@ public final class PlaybackStateStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func loadCachedAudio(_ url: URL, for track: Track, requestID: UUID, paused: Bool) throws -> Bool {
+    func loadCachedAudio(_ url: URL, for track: Track, requestID: UUID, paused: Bool,
+                         resumePosition: Double? = nil) throws -> Bool {
         loadLock.lock()
         defer { loadLock.unlock() }
         guard isCurrentOnlineRequest(requestID, trackID: track.id) else { return false }
         lock.lock()
         activeMediaURL = url
         playbackArmed = false
+        if let position = resumePosition, position.isFinite, position > 0 {
+            pendingRestore = PendingRestore(trackID: track.id, position: position, shouldPlay: !paused)
+        }
         lock.unlock()
         try engine.load(url: url, paused: paused)
         publish()

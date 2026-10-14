@@ -85,6 +85,15 @@ struct PlayerProgressSeekResolution: Equatable {
     }
 }
 
+/// Keyboard/VoiceOver adjustment uses the same pending-seek path as dragging.
+enum PlayerProgressAdjustment {
+    static func target(position: Double, duration: Double, hasTrack: Bool, delta: Double) -> Double? {
+        guard hasTrack, duration.isFinite, duration > 0, delta.isFinite else { return nil }
+        let current = position.isFinite ? position : 0
+        return min(duration, max(0, current + delta))
+    }
+}
+
 // MARK: - 进度条
 
 /// 播放器栏进度条。轨道始终渲染；有曲但时长未出时显示不确定进度，无曲时只留空轨道。
@@ -166,8 +175,25 @@ struct PlayerProgressBar: View {
             .accessibilityElement()
             .accessibilityLabel("播放进度")
             .accessibilityValue(accessibilityValue)
+            .accessibilityHint("使用左右方向键或辅助功能调节动作，每次跳转 5 秒")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: adjust(by: 5)
+                case .decrement: adjust(by: -5)
+                @unknown default: break
+                }
+            }
         }
         .frame(height: Self.totalHeight)
+        .focusable(hasTrack && hasDuration)
+        .disabled(!hasTrack || !hasDuration)
+        .onMoveCommand { direction in
+            switch direction {
+            case .right: adjust(by: 5)
+            case .left: adjust(by: -5)
+            default: break
+            }
+        }
         // 引擎走到目标附近即交回引擎值；否则进度条会一直显示旧目标。
         .onChange(of: position) { _ in confirmPendingIfReached() }
         // 切歌：拖动状态与待确认目标都属于上一首，必须清空。
@@ -194,19 +220,29 @@ struct PlayerProgressBar: View {
     private func seekGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                guard hasDuration else { return }
+                guard hasTrack && hasDuration else { return }
                 scrubValue = seconds(atX: value.location.x, width: width)
             }
             .onEnded { value in
-                guard hasDuration else { return }
+                guard hasTrack && hasDuration else { return }
                 let target = seconds(atX: value.location.x, width: width)
                 // 目标立刻接管显示并保留到引擎确认，中间不会闪回旧 position —— 这是「点击闪烁」的根因修复。
-                scrubValue = nil
-                pendingSeek = target
-                pendingDeadline = Date().addingTimeInterval(Self.pendingLifetime)
-                pendingToken &+= 1
-                onSeek(target)
+                commitSeek(target)
             }
+    }
+
+    private func adjust(by delta: Double) {
+        guard let target = PlayerProgressAdjustment.target(position: displayPosition, duration: duration,
+                                                            hasTrack: hasTrack, delta: delta) else { return }
+        commitSeek(target)
+    }
+
+    private func commitSeek(_ target: Double) {
+        scrubValue = nil
+        pendingSeek = target
+        pendingDeadline = Date().addingTimeInterval(Self.pendingLifetime)
+        pendingToken &+= 1
+        onSeek(target)
     }
 
     private func seconds(atX x: CGFloat, width: CGFloat) -> Double {

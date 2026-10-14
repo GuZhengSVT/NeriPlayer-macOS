@@ -37,7 +37,7 @@ struct LibraryTrackRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            CoverThumbnail(path: track.coverPath, size: coverSize)
+            CoverThumbnail(path: track.coverPath, size: coverSize, revision: track.fingerprintMtime)
             VStack(alignment: .leading, spacing: 3) {
                 Text(track.title)
                     .font(typography.uiFont(size: titleSize))
@@ -134,11 +134,13 @@ struct CoverThumbnail: View {
 
     let path: String?
     let size: CGFloat
+    var revision: Double?
     var cornerRadius: CGFloat = 4
+    @State private var image: NSImage?
 
     var body: some View {
         Group {
-            if let image = Self.loadImage(path) {
+            if let image {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
@@ -154,11 +156,11 @@ struct CoverThumbnail: View {
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .accessibilityHidden(true)
-    }
-
-    /// 读封面文件。路径为空或文件不可解码时返回 nil，由调用方回落占位图。
-    private static func loadImage(_ path: String?) -> NSImage? {
-        guard let path, !path.isEmpty else { return nil }
-        return NSImage(contentsOfFile: path)
+        .task(id: (path ?? "") + "#" + (revision.map { String($0) } ?? "unknown")) {
+            image = nil
+            let loaded = await LocalArtworkLoader.shared.image(path: path, revision: revision)
+            guard !Task.isCancelled else { return }
+            image = loaded?.image
+        }
     }
 }

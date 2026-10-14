@@ -340,7 +340,7 @@ final class SettingsFeatureTests: XCTestCase {
         XCTAssertEqual(recorder.urls.map(canonicalPath), [canonicalPath(existing)], "只应扫描可用目录")
         XCTAssertEqual(
             viewModel.statusMessage,
-            "正在重新扫描 1 个目录；\(missingURL.lastPathComponent) 当前不可用"
+            "已提交重新扫描 1 个目录；\(missingURL.lastPathComponent) 当前不可用"
         )
     }
 

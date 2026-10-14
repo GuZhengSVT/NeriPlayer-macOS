@@ -124,7 +124,7 @@ struct NowPlayingPage: View {
     private func compactHeader(width: CGFloat) -> some View {
         let track = snapshot?.currentTrack
         let size = compactCoverSize(track: track, availableWidth: max(120, width - 40))
-        return VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 8) {
             backButton
             HStack(alignment: .top, spacing: 14) {
                 PlayerArtwork(content: PlayerArtwork.content(for: track, library: appState.libraryViewModel),
@@ -137,7 +137,8 @@ struct NowPlayingPage: View {
             metaBlock
             actionRow(compact: true)
         }
-        .padding(20)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -145,7 +146,7 @@ struct NowPlayingPage: View {
     private func compactCoverSize(track: Track?, availableWidth: CGFloat) -> CGSize {
         let base = PlayerArtwork.pageSize(for: track)
         guard base.height > 0 else { return CGSize(width: 120, height: 120) }
-        let height: CGFloat = 132
+        let height: CGFloat = 76
         let width = height * (base.width / base.height)
         let scale = min(1, availableWidth / width)
         return CGSize(width: (width * scale).rounded(), height: (height * scale).rounded())
@@ -186,17 +187,11 @@ struct NowPlayingPage: View {
 
     /// 音频规格：只显示内核实际报告过的字段（编码 → 比特率 → 采样率 → 声道，缺值不编造）。
     private var metaBlock: some View {
-        Group {
-            if let summary = AudioInfoText.summary(snapshot?.audioTrackInfo) {
-                Label(summary, systemImage: "waveform")
-                    .font(typography.uiFont(size: 13))
-                    .foregroundStyle(.secondary)
-            } else {
-                Label("音频信息待加载", systemImage: "waveform")
-                    .font(typography.uiFont(size: 13))
-                    .foregroundStyle(.tertiary)
-            }
-        }
+        PlaybackSourceAndSpecLabel(track: snapshot?.currentTrack, audioInfo: snapshot?.audioTrackInfo,
+                                   coordinator: appState.onlinePlayback)
+            .font(typography.uiFont(size: 13))
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
     }
 
     /// 常用动作：收藏、加入歌单、队列、桌面歌词。窄窗只留图标，避免一行放不下。
@@ -258,8 +253,12 @@ struct NowPlayingPage: View {
         } label: {
             Label("加入歌单", systemImage: "text.badge.plus")
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .disabled(target == nil)
         .help("加入歌单")
+        .accessibilityLabel("加入歌单")
     }
 
     // MARK: - 右列：歌词

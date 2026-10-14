@@ -245,7 +245,7 @@ public final class MPVEngine: PlayerEngine, ResolvedAudioPlayerEngine, @unchecke
                 if let device = settings.outputDevice {
                     try controller.setString("audio-device", device)
                 }
-                try controller.setString("ao", settings.exclusiveOutput ? "coreaudio_exclusive" : "coreaudio")
+                try controller.setString("ao", settings.exclusiveOutput ? "coreaudio_exclusive" : AudioEffectCommandPlan.sharedOutputDriver)
             }
         } catch {
             Log.player.error("应用音效设置失败：\(error.localizedDescription)")

@@ -48,6 +48,182 @@ enum LibrarySection: String, CaseIterable, Identifiable {
     }
 }
 
+/// View-only browsing state. It outlives the page, but does not retain any network task.
+@MainActor
+final class LibraryBrowserState: ObservableObject {
+    @Published var section: LibrarySection = .songs
+    @Published var query = ""
+    @Published var artistID: String?
+    @Published var albumID: String?
+    // Updating offsets must not invalidate the entire list on every scroll event.
+    var scrollPositions: [String: NSPoint] = [:]
+    private(set) var capturesScroll = true
+
+    var scrollKey: String {
+        if section == .artists, let artistID { return "artist:" + artistID }
+        if section == .albums, let albumID { return "album:" + albumID }
+        return section.rawValue
+    }
+
+    func changeSection(_ value: LibrarySection) {
+        guard section != value else { return }
+        section = value; artistID = nil; albumID = nil
+    }
+
+    func reconcile(artistIDs: Set<String>, albumIDs: Set<String>) {
+        if let artistID, !artistIDs.contains(artistID) { self.artistID = nil }
+        if let albumID, !albumIDs.contains(albumID) { self.albumID = nil }
+    }
+
+    func activateScrollCapture() { capturesScroll = true }
+    func deactivateScrollCapture() { capturesScroll = false }
+}
+
+/// NSScrollView offsets work on the macOS 13 deployment target and preserve the actual
+/// viewport, even when no row is selected. Each dimension/detail uses a separate key.
+struct LibraryScrollPosition: NSViewRepresentable {
+    let browser: LibraryBrowserState
+    let key: String
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func updateNSView(_ view: NSView, context: Context) {
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak view] in
+            guard let view else { return }
+            coordinator.attach(from: view, browser: browser, key: key)
+        }
+    }
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.detach() }
+
+    @MainActor
+    final class Coordinator {
+        private weak var scrollView: NSScrollView?
+        private var browser: LibraryBrowserState?
+        private var key = ""
+        private var observer: NSObjectProtocol?
+        private var detached = false
+        private var isRestoring = false
+
+        func attach(from view: NSView, browser: LibraryBrowserState, key: String, retry: Int = 0) {
+            guard !detached else { return }
+            var ancestor: NSView? = view
+            var found: NSScrollView?
+            var root: NSView = view
+            while let current = ancestor, found == nil {
+                root = current
+                // The representable is hosted in the scroll view's document tree.
+                // Use direct ownership when AppKit exposes it.
+                found = current as? NSScrollView
+                ancestor = current.superview
+            }
+            // SwiftUI may host a List's background representable beside the List's
+            // NSScrollView instead of beneath its document view. In that case search
+            // only the containing SwiftUI subtree and select its nearest vertical
+            // scroller; choosing the first descendant can hit the horizontal tab row.
+            if found == nil {
+                found = Self.scrollViews(in: root).max { lhs, rhs in
+                    let left = Self.scrollViewScore(lhs, marker: view)
+                    let right = Self.scrollViewScore(rhs, marker: view)
+                    if abs(left.overlap - right.overlap) > 0.001 { return left.overlap < right.overlap }
+                    if left.axis != right.axis { return left.axis > right.axis }
+                    return left.distance > right.distance
+                }
+            }
+            guard let found else {
+                guard retry < 8 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak view] in
+                    guard let self, let view else { return }
+                    self.attach(from: view, browser: browser, key: key, retry: retry + 1)
+                }
+                return
+            }
+            guard scrollView !== found || self.key != key else { return }
+            stopObserving()
+            scrollView = found; self.browser = browser; self.key = key
+            isRestoring = true
+            let saved = browser.scrollPositions[key] ?? .zero
+            let clip = found.contentView
+            clip.postsBoundsChangedNotifications = true
+            observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                                                              object: clip, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.capture() }
+            }
+            // SwiftUI List may not have its final document size during the first
+            // representable update. Restore on the next run-loop after it lays out,
+            // otherwise the saved offset is clamped against a zero-height document.
+            DispatchQueue.main.async { [weak self, weak found] in
+                guard let self, let found, !self.detached,
+                      self.scrollView === found, self.key == key else { return }
+                found.layoutSubtreeIfNeeded()
+                let clip = found.contentView
+                let document = found.documentView?.bounds.size ?? .zero
+                clip.scroll(to: Self.clamped(saved, document: document, viewport: clip.bounds.size))
+                found.reflectScrolledClipView(clip)
+                self.isRestoring = false
+            }
+        }
+        private static func scrollViews(in root: NSView) -> [NSScrollView] {
+            var result: [NSScrollView] = []
+            func visit(_ view: NSView) {
+                if let scroll = view as? NSScrollView { result.append(scroll) }
+                view.subviews.forEach(visit)
+            }
+            visit(root)
+            return result
+        }
+        private static func scrollViewScore(_ scroll: NSScrollView, marker: NSView) -> (overlap: CGFloat, axis: Int, distance: Int) {
+            let clipSize = scroll.contentView.bounds.size
+            let documentSize = scroll.documentView?.bounds.size ?? .zero
+            let markerRect = marker.convert(marker.bounds, to: nil)
+            let viewportRect = scroll.contentView.convert(scroll.contentView.bounds, to: nil)
+            let intersection = markerRect.intersection(viewportRect)
+            let markerArea = max(1, markerRect.width * markerRect.height)
+            let overlap = intersection.isNull ? 0 : intersection.width * intersection.height / markerArea
+            let verticalOverflow = documentSize.height > clipSize.height + 1
+            let horizontalOverflow = documentSize.width > clipSize.width + 1
+            let axis: Int
+            if verticalOverflow { axis = 0 }
+            else if scroll.hasVerticalScroller { axis = 1 }
+            else if !horizontalOverflow { axis = 2 }
+            else { axis = 3 }
+            return (overlap, axis, treeDistance(marker, scroll))
+        }
+        private static func treeDistance(_ lhs: NSView, _ rhs: NSView) -> Int {
+            var lhsDistances: [ObjectIdentifier: Int] = [:]
+            var current: NSView? = lhs
+            var distance = 0
+            while let view = current {
+                lhsDistances[ObjectIdentifier(view)] = distance
+                distance += 1
+                current = view.superview
+            }
+            current = rhs
+            distance = 0
+            while let view = current {
+                if let lhsDistance = lhsDistances[ObjectIdentifier(view)] { return lhsDistance + distance }
+                distance += 1
+                current = view.superview
+            }
+            return Int.max
+        }
+        static func clamped(_ point: NSPoint, document: NSSize, viewport: NSSize) -> NSPoint {
+            NSPoint(x: min(max(0, point.x), max(0, document.width - viewport.width)),
+                    y: min(max(0, point.y), max(0, document.height - viewport.height)))
+        }
+        private func capture() {
+            guard !isRestoring, let scrollView, browser?.capturesScroll == true else { return }
+            browser?.scrollPositions[key] = scrollView.contentView.bounds.origin
+        }
+        private func stopObserving() {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+        }
+        func detach() { detached = true; stopObserving(); scrollView = nil }
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+    }
+}
+
 // MARK: - 主视图
 
 /// 媒体库 tab 内容视图。
@@ -56,9 +232,11 @@ struct LibraryView: View {
     /// 视图模型由上层（MainContentView）持有，这里只观察。
     @ObservedObject var viewModel: LibraryViewModel
     var favoritesPage = false
+    @Environment(\.playbackPageTitleOverride) private var playbackPageTitleOverride
     @EnvironmentObject private var appState: AppState
 
-    @State private var section: LibrarySection = .songs
+    @ObservedObject var browser: LibraryBrowserState
+    private var section: LibrarySection { browser.section }
     /// 右键「新建歌单…」时待加入的曲目；非 nil 即弹出命名面板。
     @State private var pendingNewPlaylistTrack: LibraryTrack?
     /// 歌单管理面板是否打开。
@@ -76,16 +254,21 @@ struct LibraryView: View {
             LibraryStatusBar(viewModel: viewModel, section: section)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle("媒体库")
+        .navigationTitle(playbackPageTitleOverride ?? "媒体库")
         .task {
             // 首次进入时读库；重复进入不重读（refresh 会由导入动作显式触发）。
             if !viewModel.hasLoaded { viewModel.load() }
         }
-        .onChange(of: section) { _ in
-            // 切换维度时退出详情页，避免「歌手详情」残留在专辑维度下。
-            viewModel.selectedArtist = nil
-            viewModel.selectedAlbum = nil
+        .onAppear {
+            browser.activateScrollCapture()
+            viewModel.onlyFavorites = favoritesPage
+            viewModel.localFilesOnly = !favoritesPage
+            viewModel.searchQuery = browser.query
+            reconcileDetails()
         }
+        .onDisappear { browser.deactivateScrollCapture() }
+        .onChange(of: viewModel.artistGroups) { _ in reconcileDetails() }
+        .onChange(of: viewModel.albumGroups) { _ in reconcileDetails() }
         .alert("媒体库", isPresented: errorPresented) {
             Button("好", role: .cancel) { viewModel.errorMessage = nil }
         } message: {
@@ -127,7 +310,7 @@ struct LibraryView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Picker("浏览维度", selection: $section) {
+            Picker("浏览维度", selection: Binding(get: { section }, set: browser.changeSection)) {
                 ForEach(LibrarySection.allCases) { item in
                     Text(item.title).tag(item)
                 }
@@ -166,14 +349,14 @@ struct LibraryView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("搜索标题、歌手、专辑，或拼音首字母（如 zl）", text: $viewModel.searchQuery)
+                TextField("搜索标题、歌手、专辑，或拼音首字母（如 zl）", text: Binding(get: { browser.query }, set: { browser.query = $0; viewModel.searchQuery = $0 }))
                     .textFieldStyle(.plain)
                 if viewModel.isSearchSettling {
                     ProgressView().controlSize(.small)
                 }
                 if !viewModel.searchQuery.isEmpty {
                     Button {
-                        viewModel.searchQuery = ""
+                        browser.query = ""; viewModel.searchQuery = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                     }
@@ -225,18 +408,20 @@ struct LibraryView: View {
     }
 
     private func trackList(_ tracks: [LibraryTrack]) -> some View {
-        LibraryTrackList(tracks: tracks, viewModel: viewModel, onNewPlaylist: requestNewPlaylist)
+        LibraryTrackList(tracks: tracks, viewModel: viewModel, onNewPlaylist: requestNewPlaylist,
+                         browser: browser, scrollKey: browser.scrollKey)
     }
 
     /// 歌手维度：未选歌手时是聚合列表，选中后是该歌手详情。
     @ViewBuilder
     private var artistsArea: some View {
-        if let selected = viewModel.selectedArtist {
-            ArtistDetailView(group: selected, viewModel: viewModel, onNewPlaylist: requestNewPlaylist)
+        if let selected = artistGroups.first(where: { $0.id == browser.artistID }) {
+            ArtistDetailView(group: selected, viewModel: viewModel, onNewPlaylist: requestNewPlaylist,
+                             browser: browser, onBack: { browser.artistID = nil })
         } else {
             List(artistGroups) { group in
                 Button {
-                    viewModel.selectedArtist = group
+                    browser.artistID = group.id
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "music.mic")
@@ -257,18 +442,21 @@ struct LibraryView: View {
                 }
                 .buttonStyle(.plain)
             }
+            .background(LibraryScrollPosition(browser: browser, key: "artists"))
+            .id("artists")
         }
     }
 
     /// 专辑维度：未选专辑时是聚合列表，选中后是整张专辑。
     @ViewBuilder
     private var albumsArea: some View {
-        if let selected = viewModel.selectedAlbum {
-            AlbumDetailView(group: selected, viewModel: viewModel, onNewPlaylist: requestNewPlaylist)
+        if let selected = albumGroups.first(where: { $0.id == browser.albumID }) {
+            AlbumDetailView(group: selected, viewModel: viewModel, onNewPlaylist: requestNewPlaylist,
+                            browser: browser, onBack: { browser.albumID = nil })
         } else {
             List(albumGroups) { group in
                 Button {
-                    viewModel.selectedAlbum = group
+                    browser.albumID = group.id
                 } label: {
                     HStack(spacing: 12) {
                         CoverThumbnail(path: group.coverPath, size: 40)
@@ -291,6 +479,8 @@ struct LibraryView: View {
                 }
                 .buttonStyle(.plain)
             }
+            .background(LibraryScrollPosition(browser: browser, key: "albums"))
+            .id("albums")
         }
     }
 
@@ -333,7 +523,7 @@ struct LibraryView: View {
             Text("没有匹配「\(viewModel.searchQuery)」的内容")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("清除搜索") { viewModel.searchQuery = "" }
+            Button("清除搜索") { browser.query = ""; viewModel.searchQuery = "" }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -373,6 +563,12 @@ struct LibraryView: View {
         )
     }
 
+    private func reconcileDetails() {
+        guard viewModel.hasLoaded else { return }
+        browser.reconcile(artistIDs: Set(viewModel.artistGroups.map(\.id)),
+                          albumIDs: Set(viewModel.albumGroups.map(\.id)))
+    }
+
     private func requestNewPlaylist(_ track: LibraryTrack) {
         pendingNewPlaylistTrack = track
     }
@@ -389,6 +585,8 @@ struct LibraryTrackList: View {
     let onNewPlaylist: (LibraryTrack) -> Void
     /// 副标题是否显示专辑（专辑详情页内显示专辑名是冗余的）。
     var showsAlbum: Bool = true
+    var browser: LibraryBrowserState? = nil
+    var scrollKey = "songs"
 
     @EnvironmentObject private var appState: AppState
     @State private var selectedTrackID: UUID?
@@ -412,6 +610,10 @@ struct LibraryTrackList: View {
                     .contextMenu { contextMenu(for: track) }
             }
         }
+        .background {
+            if let browser { LibraryScrollPosition(browser: browser, key: scrollKey) }
+        }
+        .id(scrollKey)
     }
 
     /// 右键菜单：播放 / 下一首播放 / 收藏 / 加入歌单。
@@ -456,6 +658,8 @@ struct ArtistDetailView: View {
     let onNewPlaylist: (LibraryTrack) -> Void
     /// 随机播放的取数过程是否可复现（默认真随机；测试时打开）。
     var isShuffleSeedFixed = false
+    var browser: LibraryBrowserState? = nil
+    var onBack: (() -> Void)? = nil
 
     @EnvironmentObject private var appState: AppState
 
@@ -466,7 +670,7 @@ struct ArtistDetailView: View {
                 title: group.name,
                 subtitle: "\(tracks.count) 首",
                 backHelp: "返回歌手列表",
-                onBack: { viewModel.selectedArtist = nil },
+                onBack: { if let onBack { onBack() } else { viewModel.selectedArtist = nil } },
                 onPlayAll: { playAll() },
                 onShuffle: { shuffleAll() },
                 isPlayEnabled: appState.playbackStore != nil && !tracks.isEmpty
@@ -475,7 +679,8 @@ struct ArtistDetailView: View {
             LibraryTrackList(
                 tracks: tracks,
                 viewModel: viewModel,
-                onNewPlaylist: onNewPlaylist
+                onNewPlaylist: onNewPlaylist,
+                browser: browser, scrollKey: "artist:" + group.id
             )
         }
     }
@@ -504,6 +709,8 @@ struct AlbumDetailView: View {
     let onNewPlaylist: (LibraryTrack) -> Void
     /// 随机播放的取数过程是否可复现（默认真随机；测试时打开）。
     var isShuffleSeedFixed = false
+    var browser: LibraryBrowserState? = nil
+    var onBack: (() -> Void)? = nil
 
     @EnvironmentObject private var appState: AppState
 
@@ -515,7 +722,7 @@ struct AlbumDetailView: View {
                 title: group.album,
                 subtitle: "\(group.artist) · \(tracks.count) 首",
                 backHelp: "返回专辑列表",
-                onBack: { viewModel.selectedAlbum = nil },
+                onBack: { if let onBack { onBack() } else { viewModel.selectedAlbum = nil } },
                 onPlayAll: { playAll() },
                 onShuffle: { shuffleAll() },
                 isPlayEnabled: appState.playbackStore != nil && !tracks.isEmpty
@@ -525,7 +732,8 @@ struct AlbumDetailView: View {
                 tracks: tracks,
                 viewModel: viewModel,
                 onNewPlaylist: onNewPlaylist,
-                showsAlbum: false
+                showsAlbum: false,
+                browser: browser, scrollKey: "album:" + group.id
             )
         }
     }
